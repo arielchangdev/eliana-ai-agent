@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eliana-integration"
+version = "0.1.0"
+description = "Eliana 自主紅隊 AI Agent 系統整合模組（第七子模組）"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "pydantic>=2",
+    "pyyaml",
+    "jsonschema",
+    "structlog",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "hypothesis",
+    "httpx",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

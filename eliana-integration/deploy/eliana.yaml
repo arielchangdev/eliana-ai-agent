@@ -1,0 +1,79 @@
+# Eliana 統一設定檔範本（RHEL VM 部署用）
+#
+# 敏感值（token/密碼/私鑰路徑）不要寫在這裡。以 ELIANA_ 前綴環境變數覆寫：
+#   export ELIANA_TELEGRAM__BOT_TOKEN="123:abc"
+#   export ELIANA_WALLET__RPC_PASSWORD="..."
+# 雙底線 __ 代表層級分隔（見 app/integration/config_manager.py）。
+#
+# 啟動模式：
+#   standalone: false  → 整合模式，啟動前跑全部依賴驗證
+#   skip_validation: false → 正式環境保持 false
+
+app:
+  name: eliana
+  standalone: false
+  skip_validation: false
+  host: 0.0.0.0
+  port: 8000
+
+# 雙機架構
+hosts:
+  weapon_host:            # Kali Linux（雙手）
+    hostname: <WEAPON_HOST_IP>    # Kali IP（主機名 kali）
+    ssh_user: eliana
+    ssh_key_path: /etc/eliana/keys/kali_ed25519   # 私鑰路徑，非私鑰本身
+    ssh_port: 22
+
+# 身體（RHEL VM）：<ELIANA_HOST_IP>
+
+# core-infra：本地 LLM 推論
+ollama:
+  base_url: http://127.0.0.1:11434
+  model: llama3.1
+  timeout_seconds: 10
+
+# digital-wallet：Electrum daemon
+wallet:
+  electrum_rpc_url: http://127.0.0.1:7777
+  rpc_user: eliana
+  # rpc_password 由 ELIANA_WALLET__RPC_PASSWORD 提供
+  network: testnet   # demo uses testnet; set to mainnet only with a secured, funded wallet
+
+# learning-engine：向量庫
+chromadb:
+  host: 127.0.0.1
+  port: 8001
+  collection: eliana_knowledge
+
+# dashboard：Telegram 通知
+telegram:
+  enabled: true
+  # bot_token 由 ELIANA_TELEGRAM__BOT_TOKEN 提供
+  chat_id: ""           # 由 ELIANA_TELEGRAM__CHAT_ID 提供
+  api_base: https://api.telegram.org
+
+# bounty-hunter：掃描與授權
+bounty:
+  crawl_interval_minutes: 60
+  require_manual_authorization: true    # 授權閘門，勿關閉
+  allowed_platforms:
+    - hackerone.com
+    - bugcrowd.com
+    - intigriti.com
+
+# personality：人格與代言
+personality:
+  active_profile: default
+  evolution_enabled: true
+  max_single_change_pct: 5
+  max_cumulative_change_pct: 15
+
+# 事件匯流排
+event_bus:
+  retry_delay_seconds: 5
+  max_retries: 3
+
+# 健康檢查
+health:
+  cache_ttl_seconds: 30
+  check_timeout_seconds: 5

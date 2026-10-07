@@ -1,0 +1,31 @@
+# systemd unit：Eliana Integration_App
+#
+# 安裝：
+#   sudo cp deploy/eliana-integration.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now eliana-integration
+#
+# 查看日誌：journalctl -u eliana-integration -f
+#
+# 注意：請把 User、WorkingDirectory、EnvironmentFile 改成你的實際值。
+
+[Unit]
+Description=Eliana Integration_App (自主紅隊 AI Agent 整合層)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=eliana
+WorkingDirectory=/opt/eliana/eliana-integration
+# 敏感環境變數檔（見 deploy/env.example）；chmod 600
+EnvironmentFile=/etc/eliana/env.local
+ExecStart=/usr/bin/python3 -m uvicorn app.integration.main:create_app --factory --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=5
+# 基本強化
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

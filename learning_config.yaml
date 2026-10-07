@@ -1,0 +1,69 @@
+# Eliana Learning Engine 預設配置
+
+# 爬取來源設定
+crawl_sources:
+  - url: "https://services.nvd.nist.gov/rest/json/cves/2.0"
+    source_type: "nvd"
+    schedule_cron: "0 2 * * *"
+    robots_respected: true
+  - url: "https://api.github.com/advisories"
+    source_type: "github_advisory"
+    schedule_cron: "0 2 * * *"
+    robots_respected: true
+  - url: "https://www.exploit-db.com"
+    source_type: "exploit_db"
+    schedule_cron: "0 3 * * *"
+    robots_respected: true
+  - url: "https://feeds.feedburner.com/TheHackersNews"
+    source_type: "rss"
+    schedule_cron: "0 4 * * *"
+    robots_respected: true
+
+# 重試設定（指數退避）
+retry:
+  initial_wait: 60.0       # 秒
+  max_wait: 1800.0         # 30 分鐘
+  max_retries: 3
+  backoff_factor: 2.0
+
+# ChromaDB 向量庫設定
+vector_store:
+  persist_dir: "data/chromadb"
+  collection_name: "eliana_knowledge"
+  archive_collection_name: "eliana_knowledge_archive"
+  embedding_model: "all-MiniLM-L6-v2"
+  embedding_dim: 384
+  distance_metric: "cosine"
+  dedup_threshold: 0.95
+  search_top_k: 10
+  search_timeout_seconds: 2.0
+  archive_stale_days: 180
+
+# 文本切分設定
+chunking:
+  min_tokens: 256
+  max_tokens: 1024
+
+# SQLite 資料庫設定
+database:
+  path: "data/sqlite/learning.db"
+
+# 策略優化設定
+strategy:
+  weight_min: 0.01
+  weight_max: 100.0
+  high_efficiency_threshold: 0.60   # 成功率 > 60% -> 權重 x1.20
+  high_efficiency_factor: 1.20
+  needs_optimization_threshold: 0.20  # 成功率 < 20% -> 權重 x0.70
+  needs_optimization_factor: 0.70
+  evaluation_window: 5              # 最近 5 次結果
+  global_alert_threshold: 0.10      # 全局平均 < 10% 告警
+
+# 報告設定
+reporting:
+  report_dir: "data/reports"
+  monthly_cron: "0 0 1 * *"          # 每月 1 日 00:00
+
+# 排程設定
+scheduler:
+  vector_optimize_cron: "0 5 * * 0"  # 每週日 05:00 索引優化

@@ -1,0 +1,5 @@
+﻿"""Bounty 模組設定常數。
+
+包含 PLATFORM_WEIGHTS、TRUST_SCORE_THRESHOLD、DEFAULT_PROFILES
+等模組級設定值。
+"""
