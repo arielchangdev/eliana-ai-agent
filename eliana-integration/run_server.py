@@ -133,7 +133,26 @@ def _try_wire_engines(dry_run: bool, config: dict | None = None):
     except Exception as exc:  # noqa: BLE001
         logger.warning("learning_engine_not_wired", error=str(exc))
 
-    return bounty, wallet, learning, backends
+    # --- personality (support-type subsystem, peer to learning) ---
+    personality = None
+    try:
+        from app.integration.personality_adapter import PersonalityAdapter
+        from eliana_core.services.local_llm import LocalLLM
+        ollama_cfg = (config or {}).get("ollama", {})
+        base_url = ollama_cfg.get("base_url", "http://127.0.0.1:11434")
+        model = ollama_cfg.get("model")
+        local_llm = LocalLLM(base_url=base_url)
+        personality = PersonalityAdapter(
+            local_llm=local_llm,
+            model=model,
+            auth_gate=None,  # default-deny until bounty Authorization_Gate is bridged
+        )
+        backends["personality"] = personality
+        logger.info("wired_personality", base_url=base_url, model=model)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("personality_not_wired", error=str(exc))
+
+    return bounty, wallet, learning, personality, backends
 
 
 def build(argv: list[str] | None = None):
@@ -165,7 +184,7 @@ def build(argv: list[str] | None = None):
                        note="掃描將真正對目標執行，請確認目標已獲授權")
 
     _cfg = cfg_mgr.config if cfg_mgr is not None else {}
-    bounty, wallet, learning, backends = _try_wire_engines(dry_run=dry_run, config=_cfg)
+    bounty, wallet, learning, personality, backends = _try_wire_engines(dry_run=dry_run, config=_cfg)
 
     # 組裝 startup checks（真實探測），standalone 時不使用
     kwargs: dict = {

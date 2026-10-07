@@ -62,6 +62,23 @@ class LearningPort(Protocol):
         ...
 
 
+@runtime_checkable
+class PersonalityPort(Protocol):
+    """Persona subsystem (support-type, peer to LearningPort).
+
+    Not a bug-bounty pipeline stage. Influences how the agent talks and how its
+    persona evolves. Wired onto the local LLM provided by core-infra.
+    """
+
+    async def generate_reply(self, context: dict) -> str:
+        """Return a persona-flavored reply for the given context."""
+        ...
+
+    async def observe_conversation(self, conversation: dict) -> None:
+        """Feed a finished conversation to the evolution path (non-fatal)."""
+        ...
+
+
 # --------------------------------------------------------------------------- #
 # 真實 stage handlers
 # --------------------------------------------------------------------------- #
