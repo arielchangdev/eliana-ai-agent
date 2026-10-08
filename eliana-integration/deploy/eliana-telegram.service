@@ -1,0 +1,19 @@
+[Unit]
+Description=Eliana Telegram Runtime (human interaction bridge)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=eliana
+WorkingDirectory=/opt/eliana
+Environment=PYTHONPATH=/opt/eliana
+Environment=LD_LIBRARY_PATH=/usr/local/lib
+EnvironmentFile=/etc/eliana/env.systemd
+ExecStart=/usr/bin/python3 /opt/eliana/eliana-integration/telegram_runtime.py
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
