@@ -65,8 +65,30 @@ class TelegramRuntime:
             return await self._reply_unauthorized(update)
         await update.message.reply_text(
             "/status - live system state\n"
+            "/local /cloud /auto - 切換 LLM 路由模式\n"
             "/chat <message> - talk to Eliana (local LLM + persona)\n"
             "/help - this message")
+
+    async def cmd_local(self, update, context) -> None:
+        if not self._authorized(update.effective_user.id):
+            return await self._reply_unauthorized(update)
+        if self._personality is not None:
+            self._personality.force_mode = "local"
+        await update.message.reply_text("已切換：強制使用本地模型（local）。")
+
+    async def cmd_cloud(self, update, context) -> None:
+        if not self._authorized(update.effective_user.id):
+            return await self._reply_unauthorized(update)
+        if self._personality is not None:
+            self._personality.force_mode = "cloud"
+        await update.message.reply_text("已切換：強制使用雲端模型（Gemini）。")
+
+    async def cmd_auto(self, update, context) -> None:
+        if not self._authorized(update.effective_user.id):
+            return await self._reply_unauthorized(update)
+        if self._personality is not None:
+            self._personality.force_mode = None
+        await update.message.reply_text("已切換：自動路由（敏感內容走本地，其餘走雲端）。")
 
     async def cmd_status(self, update, context) -> None:
         if not self._authorized(update.effective_user.id):
@@ -91,12 +113,18 @@ class TelegramRuntime:
         placeholder = await update.message.reply_text("\u601d\u8003\u4e2d\u2026")  # 思考中…
         buf = []
         last_edit_len = 0
+        header = ""
         import time as _t
         last_t = _t.monotonic()
         try:
-            async for chunk in self._personality.generate_reply_stream({"prompt": text}):
+            async for chunk in self._personality.generate_reply_stream({"prompt": text, "history_key": str(update.effective_chat.id)}):
+                if isinstance(chunk, str) and chunk.startswith("__BACKEND__:"):
+                    lbl = chunk.split(":", 1)[1].strip()
+                    header = ("\u2601\ufe0f \u96f2\u7aef (Gemini)\n\n" if lbl == "cloud"
+                              else "\U0001f5a5\ufe0f \u672c\u5730 (\u672c\u6a5f\u6a21\u578b)\n\n")
+                    continue
                 buf.append(chunk)
-                cur = "".join(buf)
+                cur = header + "".join(buf)
                 # 節流：每累積 >=60 字或每 2 秒才編輯一次，避免觸發 Telegram 限流
                 if len(cur) - last_edit_len >= 60 or (_t.monotonic() - last_t) >= 2.0:
                     if cur.strip() and cur[:4000] != "":
@@ -106,7 +134,7 @@ class TelegramRuntime:
                             last_t = _t.monotonic()
                         except Exception:
                             pass
-            final = "".join(buf).strip() or "(no reply)"
+            final = (header + "".join(buf).strip()) or "(no reply)"
             try:
                 await placeholder.edit_text(final[:4000])
             except Exception:
@@ -144,6 +172,9 @@ class TelegramRuntime:
         app.add_handler(CommandHandler("start", self.cmd_start))
         app.add_handler(CommandHandler("help", self.cmd_help))
         app.add_handler(CommandHandler("status", self.cmd_status))
+        app.add_handler(CommandHandler("local", self.cmd_local))
+        app.add_handler(CommandHandler("cloud", self.cmd_cloud))
+        app.add_handler(CommandHandler("auto", self.cmd_auto))
         app.add_handler(CommandHandler("chat", self.cmd_chat))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
         self._app = app
