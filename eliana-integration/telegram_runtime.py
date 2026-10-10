@@ -66,6 +66,7 @@ class TelegramRuntime:
         await update.message.reply_text(
             "/status - live system state\n"
             "/local /cloud /auto - 切換 LLM 路由模式\n"
+            "/persona /undo /evolve - 人格演化查看與控制\n"
             "/chat <message> - talk to Eliana (local LLM + persona)\n"
             "/help - this message")
 
@@ -89,6 +90,50 @@ class TelegramRuntime:
         if self._personality is not None:
             self._personality.force_mode = None
         await update.message.reply_text("已切換：自動路由（敏感內容走本地，其餘走雲端）。")
+
+    async def cmd_persona(self, update, context) -> None:
+        if not self._authorized(update.effective_user.id):
+            return await self._reply_unauthorized(update)
+        if self._personality is None:
+            return await update.message.reply_text("persona: not wired")
+        await self._personality._ensure_components()
+        knobs = self._personality._snapshot_knobs(self._personality._active_profile())
+        if not knobs:
+            return await update.message.reply_text("目前沒有可顯示的人格參數。")
+        lines = ["我目前的人格參數："] + [f"- {k}: {v}" for k, v in knobs.items()]
+        en = "開啟" if getattr(self._personality, "_evolve_enabled", True) else "暫停"
+        lines.append(f"演化狀態：{en}")
+        await update.message.reply_text("\n".join(lines))
+
+    async def cmd_undo(self, update, context) -> None:
+        if not self._authorized(update.effective_user.id):
+            return await self._reply_unauthorized(update)
+        if self._personality is None:
+            return await update.message.reply_text("undo: not wired")
+        comps = await self._personality._ensure_components()
+        if comps is None:
+            return await update.message.reply_text("undo: components unavailable")
+        try:
+            hist = await comps.evolution.get_version_history(limit=2)
+            if not hist or len(hist) < 2:
+                return await update.message.reply_text("沒有可還原的前一個版本。")
+            prev = hist[1]
+            vid = prev.get("version_id") if isinstance(prev, dict) else getattr(prev, "version_id", None)
+            await comps.evolution.rollback_to_version(vid)
+            await update.message.reply_text("已還原到上一個人格版本。")
+        except Exception as exc:
+            await update.message.reply_text(f"還原失敗：{exc}")
+
+    async def cmd_evolve(self, update, context) -> None:
+        if not self._authorized(update.effective_user.id):
+            return await self._reply_unauthorized(update)
+        arg = (context.args[0].lower() if context.args else "")
+        if arg not in ("on", "off"):
+            cur = "開啟" if getattr(self._personality, "_evolve_enabled", True) else "暫停"
+            return await update.message.reply_text(f"用法：/evolve on 或 /evolve off（目前：{cur}）")
+        if self._personality is not None:
+            self._personality._evolve_enabled = (arg == "on")
+        await update.message.reply_text(f"人格演化已{'開啟' if arg=='on' else '暫停'}。")
 
     async def cmd_status(self, update, context) -> None:
         if not self._authorized(update.effective_user.id):
@@ -175,6 +220,9 @@ class TelegramRuntime:
         app.add_handler(CommandHandler("local", self.cmd_local))
         app.add_handler(CommandHandler("cloud", self.cmd_cloud))
         app.add_handler(CommandHandler("auto", self.cmd_auto))
+        app.add_handler(CommandHandler("persona", self.cmd_persona))
+        app.add_handler(CommandHandler("undo", self.cmd_undo))
+        app.add_handler(CommandHandler("evolve", self.cmd_evolve))
         app.add_handler(CommandHandler("chat", self.cmd_chat))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
         self._app = app
@@ -212,6 +260,16 @@ def main() -> int:
 
     async def _post_init(application):
         await rt.announce_online()
+        # wire evolution notifications to the owner's chat
+        chat_id = rt._cfg.get("chat_id")
+        if rt._personality is not None and chat_id:
+            async def _notify(text):
+                try:
+                    await application.bot.send_message(chat_id=int(chat_id), text=text)
+                except Exception:
+                    pass
+            if hasattr(rt._personality, "set_notify_callback"):
+                rt._personality.set_notify_callback(_notify)
 
     app.post_init = _post_init
     logger.info("starting telegram polling")

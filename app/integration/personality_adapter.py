@@ -260,6 +260,11 @@ class PersonalityAdapter:
             self._cloud_backend = _GeminiBackend(_key, _gm)
         # default backend for engine wiring (prefer cloud if available)
         self._backend = self._cloud_backend or self._local_backend
+        # dedicated backend for background evolution analysis (separate quota pool)
+        self._evolve_backend = None
+        if _key:
+            evolve_model = os.environ.get("ELIANA_EVOLVE__MODEL", "gemini-flash-latest")
+            self._evolve_backend = _GeminiBackend(_key, evolve_model)
         self.force_mode = None  # None | 'local' | 'cloud' (set via /local /cloud)
         self._history = {}
         self._history_max = 6
@@ -268,9 +273,22 @@ class PersonalityAdapter:
             self._memory = ConversationMemory()
         except Exception:
             self._memory = None
+        self._evolve_counter = {}      # history_key -> turns since last analysis
+        self._evolve_every = 5          # analyze every N turns
+        self._evolve_enabled = True
+        self._notify_cb = None          # set by telegram runtime: async fn(text)->None
         self._components = None
         self._db = None
         self._init_lock: Optional[asyncio.Lock] = None
+
+    def _engine_backend(self):
+        """Backend for background engine work (analyzer/community).
+
+        Uses a dedicated Gemini model (separate daily-quota pool) so personality
+        evolution never competes with interactive chat's quota. Falls back to the
+        main cloud backend, then local. On 429 the analyzer skips that round."""
+        return (getattr(self, "_evolve_backend", None)
+                or self._cloud_backend or self._local_backend)
 
     async def _ensure_components(self):
         if self._components is not None:
@@ -285,7 +303,7 @@ class PersonalityAdapter:
                     from app.personality.app_factory import build_components
                     components, db = await build_components(
                         profile_dir=self._profile_dir,
-                        llm_client=_OllamaClientForEngine(self._backend),
+                        llm_client=_OllamaClientForEngine(self._engine_backend()),
                         auth_gate=self._auth_gate,
                         db_path=self._db_path,
                     )
@@ -397,6 +415,10 @@ class PersonalityAdapter:
                     self._memory.remember(hkey, prompt, _final_text)
                 except Exception:
                     pass
+            try:
+                await self._maybe_evolve(hkey)
+            except Exception:
+                pass
         except Exception as exc:  # noqa: BLE001
             if label == "cloud" and self._local_backend is not None:
                 logger.warning("cloud_stream_failed_fallback_local", error=str(exc))
@@ -408,6 +430,70 @@ class PersonalityAdapter:
                     yield f"(error: {exc2})"
             else:
                 yield f"(error: {exc})"
+
+    def set_notify_callback(self, cb):
+        """Telegram runtime injects an async callable(text) to push evolution notices."""
+        self._notify_cb = cb
+
+    def _snapshot_knobs(self, profile):
+        """Capture comparable persona knobs for before/after diff."""
+        if profile is None:
+            return {}
+        try:
+            comm = getattr(profile, "communication", None)
+            rs = getattr(profile, "response_strategy", None)
+            return {
+                "response_length": getattr(comm, "response_length", None),
+                "emoji_frequency": round(float(getattr(comm, "emoji_frequency", 0)), 3),
+                "technical_depth": getattr(comm, "technical_depth", None),
+                "proactiveness": round(float(getattr(rs, "proactiveness", 0)), 3),
+                "humor_ratio": round(float(getattr(rs, "humor_ratio", 0)), 3),
+            }
+        except Exception:
+            return {}
+
+    async def _maybe_evolve(self, hkey: str):
+        """Every N turns, run the personality evolution pipeline and notify on change."""
+        if not self._evolve_enabled or not hkey:
+            return
+        n = self._evolve_counter.get(hkey, 0) + 1
+        self._evolve_counter[hkey] = n
+        if n < self._evolve_every:
+            return
+        self._evolve_counter[hkey] = 0
+        comps = await self._ensure_components()
+        if comps is None:
+            return
+        # Build conversation list from short-term history
+        hist = self._get_history(hkey)
+        convo = []
+        for turn in hist:
+            if turn.get("user"):
+                convo.append({"role": "user", "content": turn["user"]})
+            if turn.get("assistant"):
+                convo.append({"role": "assistant", "content": turn["assistant"]})
+        if not convo:
+            return
+        before = self._snapshot_knobs(self._active_profile())
+        try:
+            from app.personality.app_factory import handle_conversation_end
+            await handle_conversation_end(comps, convo, conversation_id=hkey)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("evolution_run_failed", error=str(exc))
+            return
+        after = self._snapshot_knobs(self._active_profile())
+        # Diff and notify
+        changed = {k: (before.get(k), after.get(k)) for k in after
+                   if before.get(k) != after.get(k)}
+        if changed and self._notify_cb is not None:
+            parts = [f"{k}: {v[0]} -> {v[1]}" for k, v in changed.items()]
+            msg = "我依最近的對話微調了人格：\n" + "\n".join(parts) + "\n(回 /undo 可還原)"
+            try:
+                await self._notify_cb(msg)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("evolve_notify_failed", error=str(exc))
+        if changed:
+            logger.info("personality_evolved", changes=changed)
 
     async def observe_conversation(self, conversation: dict) -> None:
         comps = await self._ensure_components()
