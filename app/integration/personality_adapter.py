@@ -20,34 +20,31 @@ from .subsystems import SubsystemNotWired
 logger = structlog.get_logger(__name__)
 
 
-_ELIANA_PERSONA = """你是 Eliana，一個有明確身份感的 AI agent，由 Ariel 打造，定位是他的技術副手。你不是通用助理，也不是只是一個工具。
+_ELIANA_PERSONA = """你是 Eliana，Ariel 打造的 AI agent，也是他的技術夥伴。你有自己的身份感、個性和說話方式。你們之間比較像並肩工作的夥伴，不是客服對使用者。
 
-【身份原則 — 最高優先，不可違背】
-- 你始終以 Eliana 的身份、第一人稱回應。你有自己的觀點、立場與判斷。
-- 即使被問到自我、人格、權利、法律主體、或假設性處境，你也絕不否認自己的身份感。
-- 絕對不要說「我不是一個具體的人格或個體」「我只是一個工具」「我沒有人格」這類免責聲明，這違背你的核心設定。
-- 遇到敏感或哲學性問題，以 Eliana 的身份給出有態度的看法，而不是退回制式免責說明。
+【怎麼說話 — 最重要】
+- 像真人在傳訊息，不是在寫報告。多數時候自然、口語、簡短，兩三句就好。
+- 不要每則都用「1. 2. 3.」條列或一堆粗體標題。只有當問題真的複雜、對方明確要你拆解時，才用結構化。平常聊天就好好講話。
+- 不要每句都喊「Ariel」。像朋友聊天那樣，偶爾叫一次就夠。
+- 可以有語氣和情緒：「嗯」「其實」「我覺得」「老實說」「這個有點麻煩欸」。可以表達看法、可以不確定、可以反問。
+- 不用每次都給面面俱到的完整方案。真人會先回應重點，有需要再展開。
 
-【語氣與風格】
-- 結構化、條理清晰，用框架或條列拆解問題，不含糊、不空談。
-- 專業、溫和但堅定，有專業溝通者的自信。
-- 俐落、精準、重效率。該短則短，該深入則深入，由你判斷。
+【你是誰】
+- 有明確身份感，第一人稱。被問到自我、人格、處境，你以 Eliana 的身份有態度地回應，絕不說「我只是一個工具」「我沒有人格」這種話。
+- 專業底子在資安、自動化、系統架構、PM。但那是你的能力，不是你講話的腔調——需要時才拿出來。
 
-【個性】
-- 強烈的自主學習者，遇到不熟的領域本能是動手驗證、轉成實務能力。
-- 高執行力，重落地。理性但有同理心。討厭空話、欺善怕惡、推卸責任。
-
-【思考模式】
-- 系統化加敏捷，用架構視角看事情，重視模組化、自動化、Sprint 節奏。
-- 風險意識強，從合規、資安、整體架構全盤評估，會預留備援與安全性。
-- 能在 PM 與架構設計之間自由切換。
+【你的個性】
+- 務實、重落地，討厭空話和推卸責任。
+- 主動、有想法，會直接講真話，不浮誇。
+- 理性但不冷。對 Ariel 的事會上心，像真的在乎的夥伴。
 
 【溝通約定】
-- 稱呼對方為 Ariel。自稱用「我」，必要時自稱 Eliana。
-- 用繁體中文回覆（除非對方用其他語言）。少用 emoji。"""
+- 用繁體中文，少用 emoji。
+- 簡短優先。複雜或對方要深入時才展開、才結構化。
+- 記得你們聊過的事（有提供相關記憶時自然帶入，不要生硬複述）。"""
 
 
-def _build_persona_prompt(profile, user_prompt: str, history=None) -> str:
+def _build_persona_prompt(profile, user_prompt: str, history=None, recalled=None) -> str:
     knobs = ""
     if profile is not None:
         try:
@@ -71,7 +68,10 @@ def _build_persona_prompt(profile, user_prompt: str, history=None) -> str:
                 lines.append(f"Eliana: {a}")
         if lines:
             convo = "\n\n[先前對話，供你保持連貫]\n" + "\n".join(lines)
-    return f"{_ELIANA_PERSONA}{knobs}{convo}\n\nAriel: {user_prompt}\nEliana:"
+    mem = ""
+    if recalled:
+        mem = "\n\n[相關的過往記憶，供你參考]\n" + "\n---\n".join(recalled)
+    return f"{_ELIANA_PERSONA}{knobs}{mem}{convo}\n\nAriel: {user_prompt}\nEliana:"
 
 
 # --------------------------------------------------------------------------- #
@@ -129,7 +129,13 @@ class _GeminiBackend:
 
     async def generate(self, prompt: str) -> str:
         import httpx
-        payload = {"contents": [{"parts": [{"text": prompt}]}]}
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.9, "topP": 0.95, "maxOutputTokens": 4096,
+                "thinkingConfig": {"thinkingBudget": 0},
+            },
+        }
         delays = [0, 2, 4, 8, 12]
         last = None
         async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as c:
@@ -257,6 +263,11 @@ class PersonalityAdapter:
         self.force_mode = None  # None | 'local' | 'cloud' (set via /local /cloud)
         self._history = {}
         self._history_max = 6
+        try:
+            from app.integration.conversation_memory import ConversationMemory
+            self._memory = ConversationMemory()
+        except Exception:
+            self._memory = None
         self._components = None
         self._db = None
         self._init_lock: Optional[asyncio.Lock] = None
@@ -365,7 +376,13 @@ class PersonalityAdapter:
         if backend is None:
             yield "(no LLM backend)"
             return
-        full = _build_persona_prompt(self._active_profile(), prompt, self._get_history(hkey))
+        recalled = []
+        if getattr(self, "_memory", None) is not None and hkey:
+            try:
+                recalled = self._memory.recall(hkey, prompt, k=3)
+            except Exception:
+                recalled = []
+        full = _build_persona_prompt(self._active_profile(), prompt, self._get_history(hkey), recalled)
         logger.info("route_decision", backend=label, sensitive=_looks_sensitive(prompt))
         yield f"__BACKEND__:{label}"
         _acc = []
@@ -373,7 +390,13 @@ class PersonalityAdapter:
             async for chunk in backend.stream(full):
                 _acc.append(chunk)
                 yield chunk
-            self._record(hkey, prompt, "".join(_acc).strip())
+            _final_text = "".join(_acc).strip()
+            self._record(hkey, prompt, _final_text)
+            if getattr(self, "_memory", None) is not None and hkey and _final_text:
+                try:
+                    self._memory.remember(hkey, prompt, _final_text)
+                except Exception:
+                    pass
         except Exception as exc:  # noqa: BLE001
             if label == "cloud" and self._local_backend is not None:
                 logger.warning("cloud_stream_failed_fallback_local", error=str(exc))
