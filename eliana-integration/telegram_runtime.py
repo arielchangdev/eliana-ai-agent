@@ -41,10 +41,13 @@ class TelegramRuntime:
         *,
         personality: Any | None = None,
         resource_monitor: Any | None = None,
+        scanner: Any | None = None,
     ) -> None:
         self._cfg = _load_cfg()
         self._personality = personality
         self._rm = resource_monitor
+        self._scanner = scanner
+        self._pending_scan = {}   # chat_id -> target awaiting /authorize
         self._app = None
 
     def _authorized(self, user_id: int) -> bool:
@@ -90,6 +93,61 @@ class TelegramRuntime:
         if self._personality is not None:
             self._personality.force_mode = None
         await update.message.reply_text("已切換：自動路由（敏感內容走本地，其餘走雲端）。")
+
+    async def cmd_scan(self, update, context) -> None:
+        if not self._authorized(update.effective_user.id):
+            return await self._reply_unauthorized(update)
+        if self._scanner is None:
+            return await update.message.reply_text("掃描子系統未啟用。")
+        target = (context.args[0].strip() if context.args else "")
+        if not target:
+            return await update.message.reply_text("用法：/scan <目標網域或網址>")
+        self._pending_scan[str(update.effective_chat.id)] = target
+        msg = (
+            "\u26a0\ufe0f 掃描授權確認\n"
+            f"目標：{target}\n\n"
+            "掃描前請確認：\n"
+            "1. 這是你擁有、或在合法 bug bounty 專案中有明確授權測試的目標嗎？\n"
+            "2. 這在該專案的 scope 範圍內嗎？\n\n"
+            f"確認請回覆：/authorize {target}\n"
+            "取消請回覆：/cancel"
+        )
+        await update.message.reply_text(msg)
+
+    async def cmd_authorize(self, update, context) -> None:
+        if not self._authorized(update.effective_user.id):
+            return await self._reply_unauthorized(update)
+        if self._scanner is None:
+            return await update.message.reply_text("掃描子系統未啟用。")
+        target = (context.args[0].strip() if context.args else "")
+        pending = self._pending_scan.get(str(update.effective_chat.id))
+        if not target or target != pending:
+            return await update.message.reply_text(
+                "請先用 /scan <目標> 發起，再用 /authorize <同一個目標> 確認。")
+        # record explicit human authorization, then run the gated scan
+        try:
+            self._scanner.grant_authorization(target, validity_hours=24)
+            await update.message.reply_text(f"已授權 {target}，開始掃描…（可能需要數分鐘）")
+        except Exception as exc:
+            return await update.message.reply_text(f"授權記錄失敗：{exc}")
+        from app.bounty.models import ProgramScope, ScanProfile
+        from app.bounty.enums import ScanTool
+        host = target.split("://")[-1].split("/")[0]
+        scope = ProgramScope(domains=[host])
+        profile = ScanProfile(tools=[ScanTool.NMAP])
+        self._pending_scan.pop(str(update.effective_chat.id), None)
+        try:
+            result = await self._scanner.scan(target, scope, profile)
+            vulns = result.get("vulnerabilities", []) if isinstance(result, dict) else getattr(result, "vulnerabilities", [])
+            await update.message.reply_text(f"掃描完成。發現項目數：{len(vulns)}")
+        except Exception as exc:
+            await update.message.reply_text(f"掃描結束（{type(exc).__name__}）：{exc}")
+
+    async def cmd_cancel(self, update, context) -> None:
+        if not self._authorized(update.effective_user.id):
+            return await self._reply_unauthorized(update)
+        self._pending_scan.pop(str(update.effective_chat.id), None)
+        await update.message.reply_text("已取消。")
 
     async def cmd_persona(self, update, context) -> None:
         if not self._authorized(update.effective_user.id):
@@ -223,6 +281,9 @@ class TelegramRuntime:
         app.add_handler(CommandHandler("persona", self.cmd_persona))
         app.add_handler(CommandHandler("undo", self.cmd_undo))
         app.add_handler(CommandHandler("evolve", self.cmd_evolve))
+        app.add_handler(CommandHandler("scan", self.cmd_scan))
+        app.add_handler(CommandHandler("authorize", self.cmd_authorize))
+        app.add_handler(CommandHandler("cancel", self.cmd_cancel))
         app.add_handler(CommandHandler("chat", self.cmd_chat))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
         self._app = app
@@ -249,13 +310,31 @@ def build_subsystems():
     model = os.environ.get("ELIANA_OLLAMA__MODEL", "llama3.1")
     llm = LocalLLM(base_url=base_url)
     personality = PersonalityAdapter(local_llm=llm, model=model)
-    rm = ResourceMonitor()
-    return personality, rm
+    # scan subsystem: SSHChannel(kali) -> ScanEngine -> AuthorizedScanner
+    scanner = None
+    ssh = None
+    try:
+        from eliana_core.services.ssh_channel import SSHChannel
+        from app.bounty.scanner import ScanEngine
+        from app.bounty.authorized_scan import AuthorizedScanner
+        weapon_host = os.environ.get("ELIANA_WEAPON__HOST", "YOUR_WEAPON_HOST")
+        weapon_user = os.environ.get("ELIANA_WEAPON__USER", "YOUR_WEAPON_USER")
+        weapon_key = os.environ.get("ELIANA_WEAPON__KEY", "/etc/eliana/keys/kali_ed25519")
+        ssh = SSHChannel(host=weapon_host, username=weapon_user,
+                         private_key_path=weapon_key, known_hosts_path=None,
+                         connect_timeout=8.0)
+        engine = ScanEngine(ssh_channel=ssh)
+        bounty_db = os.environ.get("ELIANA_BOUNTY__DB", "/opt/eliana/data/bounty.db")
+        scanner = AuthorizedScanner(db_path=bounty_db, scan_engine=engine)
+    except Exception as exc:
+        logger.warning("scan subsystem not wired: %s", exc)
+    rm = ResourceMonitor(ssh_channel=ssh)
+    return personality, rm, scanner
 
 
 def main() -> int:
-    personality, rm = build_subsystems()
-    rt = TelegramRuntime(personality=personality, resource_monitor=rm)
+    personality, rm, scanner = build_subsystems()
+    rt = TelegramRuntime(personality=personality, resource_monitor=rm, scanner=scanner)
     app = rt.build()
 
     async def _post_init(application):
