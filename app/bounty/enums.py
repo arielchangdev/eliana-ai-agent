@@ -17,11 +17,23 @@ class PlatformType(Enum):
 
 
 class ScanTool(Enum):
-    """支援的掃描工具。"""
+    """支援的掃描工具。
 
-    NMAP = "nmap"
-    NIKTO = "nikto"
-    NUCLEI = "nuclei"
+    全部以「評估模式」使用（偵察/列舉/漏洞偵測），不含漏洞利用。
+    SQLMAP 的解析器保留供人類操作者手動匯入結果，但不納入 agent 自動
+    編排（見 scanner._AUTO_ORCHESTRATION_TOOLS）——利用驗證由授權人類執行。
+    """
+
+    # --- 評估/偵察（agent 自動編排）---
+    NMAP = "nmap"            # port/service 偵察（safe/default scripts）
+    NIKTO = "nikto"          # web server 配置掃描
+    NUCLEI = "nuclei"        # 模板化漏洞偵測
+    WHATWEB = "whatweb"      # 技術指紋辨識
+    WAFW00F = "wafw00f"      # WAF 偵測
+    DNSRECON = "dnsrecon"    # DNS 記錄被動查詢
+    SSLSCAN = "sslscan"      # TLS/SSL 配置檢查
+    GOBUSTER = "gobuster"    # 目錄/路徑唯讀列舉
+    # --- 利用驗證（不自動編排；由授權人類操作者執行）---
     SQLMAP = "sqlmap"
 
 
