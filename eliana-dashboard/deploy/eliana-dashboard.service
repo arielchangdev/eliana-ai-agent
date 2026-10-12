@@ -1,0 +1,24 @@
+[Unit]
+Description=Eliana Dashboard (FastAPI + Vue, real data providers)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=eliana
+WorkingDirectory=/opt/eliana/eliana-dashboard
+# PYTHONPATH must include the engine root, the dashboard package, and src/
+# so real_adapter can import eliana_core / app.bounty / VectorStore.
+Environment=PYTHONPATH=/opt/eliana:/opt/eliana/eliana-dashboard:/opt/eliana/src
+Environment=LD_LIBRARY_PATH=/usr/local/lib
+# All runtime values (bind host/port, chroma dirs, personality/bounty db,
+# weapon host/user/key) come from this file so no real paths/IPs live in the
+# repo. See deploy/env.dashboard.example for the key list.
+EnvironmentFile=/etc/eliana/env.dashboard
+ExecStart=/usr/bin/python3 /opt/eliana/eliana-dashboard/serve.py
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
