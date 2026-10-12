@@ -1,0 +1,20 @@
+[Unit]
+Description=Eliana Electrum testnet daemon (wallet backend)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=eliana
+# --testnet is REQUIRED here: it locks the daemon to the Bitcoin test network
+# on every (re)start so the wallet chain can never silently come up on mainnet.
+# Runs in the foreground (no -d) so systemd owns the process lifecycle.
+ExecStart=/usr/bin/python3 %h/.local/bin/electrum --testnet daemon
+# Load the testnet wallet once the daemon is up so RPC getbalance/history work.
+ExecStartPost=/bin/sh -c 'sleep 5; /usr/bin/python3 %h/.local/bin/electrum --testnet load_wallet || true'
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
