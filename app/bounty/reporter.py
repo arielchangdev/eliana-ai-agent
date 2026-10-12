@@ -362,6 +362,111 @@ def build_llm_prompt(vulnerability: Vulnerability, template: ReportTemplate) -> 
     return prompt
 
 
+# --- LLM response section parsing ---
+
+# Section-heading keyword -> canonical report field. Covers the section names
+# used across all four platform templates so the narrative can be split into
+# the dashboard's description / reproduction / impact / remediation columns.
+_SECTION_ALIASES: dict[str, str] = {
+    # description
+    "description": "description",
+    "technical description": "description",
+    "technical_description": "description",
+    "summary": "description",
+    "vulnerability type": "description",
+    # reproduction
+    "steps to reproduce": "reproduction",
+    "steps_to_reproduce": "reproduction",
+    "reproduction": "reproduction",
+    "reproduction steps": "reproduction",
+    "proof of concept": "reproduction",
+    "proof_of_concept": "reproduction",
+    "poc": "reproduction",
+    "exploitation steps": "reproduction",
+    "exploitation_steps": "reproduction",
+    # impact
+    "impact": "impact",
+    "impact analysis": "impact",
+    "impact_analysis": "impact",
+    "impact assessment": "impact",
+    # remediation
+    "remediation": "remediation",
+    "remediation advice": "remediation",
+    "remediation_advice": "remediation",
+    "suggested fix": "remediation",
+    "suggested_fix": "remediation",
+    "recommendation": "remediation",
+    "fix": "remediation",
+    "mitigation": "remediation",
+}
+
+# Headings that are metadata/structure, not narrative body. When seen, their
+# body is dropped (not routed to description) so description stays clean. The
+# report's title/severity/cvss already live in dedicated columns.
+_SKIP_HEADINGS: set[str] = {
+    "vulnerability report", "report", "title", "severity", "cve id",
+    "cve_id", "cve", "scope", "domain", "endpoint", "url", "url endpoint",
+    "url_endpoint", "domain endpoint", "domain_endpoint", "supporting material",
+    "attachments", "evidence",
+}
+
+
+def _normalize_heading(text: str) -> str:
+    """Strip markdown heading markup/numbering/punctuation and lowercase."""
+    t = text.strip().lstrip("#").strip()
+    t = t.lstrip("*").rstrip("*").strip()
+    # drop leading numbering like "1." / "2)"
+    import re as _re
+    t = _re.sub(r"^\d+[.)]\s*", "", t)
+    t = t.rstrip(":").strip().lower()
+    return t
+
+
+def parse_report_sections(llm_response: str) -> dict:
+    """Split an LLM report into {description, reproduction, impact, remediation}.
+
+    Walks markdown-style heading lines (``#``/``##``/``###`` or ``**Bold:**``)
+    and routes the body under each heading to a canonical field via
+    _SECTION_ALIASES. Content before the first recognized heading, and any
+    unrecognized section, falls back into ``description`` so nothing is lost.
+    Returns a dict; callers decide how to use it. Pure function (testable).
+    """
+    fields = {"description": [], "reproduction": [], "impact": [],
+              "remediation": [], "_skip": []}
+    current = "description"  # pre-heading content goes to description
+    matched_any = False
+
+    for raw in (llm_response or "").split(chr(10)):
+        line = raw.rstrip()
+        stripped = line.strip()
+        is_heading = False
+        heading_text = ""
+        if stripped.startswith("#"):
+            is_heading = True
+            heading_text = stripped
+        elif (stripped.startswith("**") and stripped.endswith("**")
+              and len(stripped) <= 60):
+            is_heading = True
+            heading_text = stripped
+        if is_heading:
+            key = _normalize_heading(heading_text)
+            if key in _SKIP_HEADINGS:
+                current = "_skip"
+                matched_any = True
+                continue
+            target = _SECTION_ALIASES.get(key)
+            if target is not None:
+                current = target
+                matched_any = True
+                continue  # don't keep the heading line itself
+        fields[current].append(line)
+
+    result = {k: chr(10).join(v).strip()
+              for k, v in fields.items() if k != "_skip"}
+    result["_matched"] = matched_any
+    return result
+
+
 # --- ReportGenerator Class ---
 
 
@@ -606,15 +711,29 @@ class ReportGenerator:
                 lines[0] if lines else "Vulnerability Report"
             )
 
+            # Split the narrative into canonical sections so the dashboard can
+            # show description / reproduction / impact / remediation separately.
+            sections = parse_report_sections(llm_response)
+            if sections.get("_matched"):
+                description = sections["description"] or llm_response
+                reproduction = sections["reproduction"]
+                impact = sections["impact"]
+                remediation = sections["remediation"]
+            else:
+                # No recognizable headings: keep the whole text as description
+                # (previous behaviour) rather than dropping anything.
+                description = llm_response
+                reproduction = impact = remediation = ""
+
             return Report(
                 vulnerability_id=vulnerability.id,
                 program_id=program.id,
                 platform=program.platform,
                 title=title,
-                description=llm_response,
-                reproduction_steps="",
-                impact_assessment="",
-                remediation="",
+                description=description,
+                reproduction_steps=reproduction,
+                impact_assessment=impact,
+                remediation=remediation,
                 cvss=cvss_result,
                 estimated_bounty=bounty_range,
                 status=ReportStatus.DRAFT,

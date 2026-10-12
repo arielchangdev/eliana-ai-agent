@@ -211,6 +211,8 @@ def _task_to_dict(t: TaskTimelineItem) -> dict:
         "durationSeconds": t.duration_seconds, "target": t.target,
         "strategy": t.strategy, "errorMessage": t.error_message,
         "outputSummary": t.output_summary,
+        "stages": getattr(t, "stages", []) or [],
+        "findings": getattr(t, "findings", []) or [],
     }
 
 

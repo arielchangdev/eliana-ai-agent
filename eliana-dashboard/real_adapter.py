@@ -359,10 +359,62 @@ def _parse_dt(s):
         return None
 
 
-def _read_scans_sync(limit: int = 100) -> list:
-    """讀 bounty.db 的 scans 表，轉成 dashboard TaskTimelineItem。
+_SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 
-    誠實：表為空或讀不到就回空 list（面板顯示「尚無掃描任務」）。
+# 五階段固定順序與人話標籤
+_STAGE_DEFS = [
+    ("scanning", "掃描中"),
+    ("found", "發現漏洞"),
+    ("assessed", "評估 CVSS"),
+    ("reported", "產生報告"),
+    ("completed", "完成"),
+]
+
+
+def _derive_stages(status: str, pct, vulns: list, has_report: bool) -> list:
+    """由四表狀態客觀推導五階段。CVSS/報告階段只有真有 MEDIUM+ / 真有報告
+    才標 done，否則 skipped（誠實：不假裝跑過）。"""
+    done = status in ("completed", "failed", "timeout")
+    scanning_done = done or (pct is not None and pct >= 100.0)
+    has_findings = len(vulns) > 0
+    has_mediumplus = any(
+        _SEVERITY_RANK.get((v.get("severity") or "").lower(), 0) >= 2
+        for v in vulns)
+
+    def state(done_cond: bool, skip_cond: bool = False, active: bool = False):
+        if done_cond:
+            return "done"
+        if skip_cond:
+            return "skipped"
+        if active:
+            return "active"
+        return "pending"
+
+    stages = []
+    for key, label in _STAGE_DEFS:
+        if key == "scanning":
+            st = state(scanning_done, active=not scanning_done)
+        elif key == "found":
+            st = state(has_findings, skip_cond=scanning_done and not has_findings)
+        elif key == "assessed":
+            # 評估 CVSS 只在有 MEDIUM+ 時點亮；否則誠實 skipped
+            st = state(has_mediumplus,
+                       skip_cond=scanning_done and not has_mediumplus)
+        elif key == "reported":
+            st = state(has_report,
+                       skip_cond=scanning_done and not has_report)
+        else:  # completed
+            st = state(done, active=not done and scanning_done)
+        stages.append({"key": key, "label": label, "state": st})
+    return stages
+
+
+def _read_scans_sync(limit: int = 100) -> list:
+    """讀 bounty.db，將每個 scan 組成帶五階段 + 發現/報告摘要的任務卡。
+
+    JOIN 四表（scans + scan_progress + vulnerabilities + reports）。
+    誠實：表為空或讀不到就回空 list（面板顯示「尚無掃描任務」）；
+    INFO-only 掃描的 CVSS/報告階段誠實標 skipped。
     """
     try:
         conn = sqlite3.connect(BOUNTY_DB)
@@ -380,13 +432,48 @@ def _read_scans_sync(limit: int = 100) -> list:
         logger.warning("task scans query failed: %s", exc)
         conn.close()
         return []
-    finally:
-        pass
-    conn.close()
 
     now_fallback = datetime.now(timezone.utc)
     for sid, target_url, status, started_at, completed_at, dur in rows:
+        # progress
+        try:
+            prow = conn.execute(
+                "SELECT percent_complete FROM scan_progress WHERE scan_id=?",
+                (sid,)).fetchone()
+            pct = prow[0] if prow else None
+        except Exception:
+            pct = None
+        # vulnerabilities + their reports (LEFT JOIN)
+        vulns = []
+        try:
+            vrows = conn.execute(
+                "SELECT v.id, v.severity, v.title, v.cve_id,"
+                " r.cvss_score, r.cvss_vector, r.description,"
+                " r.reproduction_steps, r.impact_assessment, r.remediation,"
+                " r.status"
+                " FROM vulnerabilities v"
+                " LEFT JOIN reports r ON r.vulnerability_id = v.id"
+                " WHERE v.scan_id = ?", (sid,)).fetchall()
+            for vr in vrows:
+                report = None
+                if vr[4] is not None or vr[6]:  # has a report row
+                    report = {
+                        "cvss_score": vr[4], "cvss_vector": vr[5],
+                        "description": vr[6], "reproduction_steps": vr[7],
+                        "impact_assessment": vr[8], "remediation": vr[9],
+                        "status": vr[10],
+                    }
+                vulns.append({
+                    "severity": vr[1], "title": vr[2], "cve_id": vr[3],
+                    "report": report,
+                })
+        except Exception as exc:
+            logger.warning("task vuln join failed scan=%s: %s", sid, exc)
+
+        has_report = any(v["report"] is not None for v in vulns)
+        stages = _derive_stages(status, pct, vulns, has_report)
         start = _parse_dt(started_at) or now_fallback
+
         items.append(TaskTimelineItem(
             task_id=sid,
             name=f"掃描 {target_url}",
@@ -398,7 +485,10 @@ def _read_scans_sync(limit: int = 100) -> list:
             strategy=None,
             error_message=None,
             output_summary=None,
+            stages=stages,
+            findings=vulns,
         ))
+    conn.close()
     return items
 
 

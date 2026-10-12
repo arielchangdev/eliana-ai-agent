@@ -17,6 +17,31 @@ export interface ResourceMetrics {
   stale: boolean
 }
 
+export type StageState = 'done' | 'active' | 'skipped' | 'pending'
+
+export interface TaskStage {
+  key: string
+  label: string
+  state: StageState
+}
+
+export interface FindingReport {
+  cvss_score: number | null
+  cvss_vector: string | null
+  description: string | null
+  reproduction_steps: string | null
+  impact_assessment: string | null
+  remediation: string | null
+  status: string | null
+}
+
+export interface TaskFinding {
+  severity: string
+  title: string
+  cve_id: string | null
+  report: FindingReport | null
+}
+
 export interface TaskTimelineItem {
   taskId: string
   name: string
@@ -28,6 +53,8 @@ export interface TaskTimelineItem {
   strategy: string | null
   errorMessage: string | null
   outputSummary: string | null
+  stages: TaskStage[]
+  findings: TaskFinding[]
 }
 
 export interface KnowledgeStats {

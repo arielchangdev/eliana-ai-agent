@@ -83,6 +83,18 @@ class TaskTimelineItem:
     strategy: Optional[str] = None
     error_message: Optional[str] = None
     output_summary: Optional[str] = None
+    # Stage timeline for a scan task. Each entry:
+    #   {"key": "scanning|found|assessed|reported|completed",
+    #    "label": "掃描中", "state": "done|active|skipped|pending"}
+    # CVSS/report stages are only "done" when a MEDIUM+ finding / real report
+    # exists; otherwise "skipped" (honest — not pretending they ran).
+    stages: list = field(default_factory=list)
+    # Findings summary. Each entry:
+    #   {"severity": "info|low|medium|high|critical", "title": str,
+    #    "cve_id": str|None, "report": {...}|None}
+    # report (when present): {"cvss_score", "cvss_vector", "description",
+    #    "reproduction_steps", "impact_assessment", "remediation", "status"}
+    findings: list = field(default_factory=list)
 
 
 @dataclass
