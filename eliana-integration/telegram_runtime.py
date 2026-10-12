@@ -17,6 +17,7 @@ _ENGINE_ROOT = _os.environ.get('ELIANA_ROOT') or '/opt/eliana'
 if _ENGINE_ROOT not in _sys.path:
     _sys.path.insert(0, _ENGINE_ROOT)
 
+import asyncio
 import logging
 import os
 from typing import Any, Optional
@@ -127,21 +128,58 @@ class TelegramRuntime:
         # record explicit human authorization, then run the gated scan
         try:
             self._scanner.grant_authorization(target, validity_hours=24)
-            await update.message.reply_text(f"已授權 {target}，開始掃描…（可能需要數分鐘）")
         except Exception as exc:
             return await update.message.reply_text(f"授權記錄失敗：{exc}")
-        from app.bounty.models import ProgramScope, ScanProfile
-        from app.bounty.enums import ScanTool
+        from app.bounty.models import ProgramScope
+        from app.bounty.scanner import build_phased_profile
         host = target.split("://")[-1].split("/")[0]
         scope = ProgramScope(domains=[host])
-        profile = ScanProfile(tools=[ScanTool.NMAP])
+        # 多工具階段化評估（評估模式；build_phased_profile 自動過濾非評估工具、
+        # 填入評估白名單 args）。依方法論 recon→enumeration→vuln_scanning 編排。
+        profile = build_phased_profile()
         self._pending_scan.pop(str(update.effective_chat.id), None)
+
+        tool_names = ", ".join(t.value for t in profile.tools)
+        await update.message.reply_text(
+            f"已授權 {target}，開始多工具評估（評估模式）。\n"
+            f"編排工具：{tool_names}\n"
+            f"方法論階段：偵察 → 列舉 → 漏洞掃描\n"
+            f"這會花幾分鐘，完成後我會回報結果，請稍候…")
+
+        # 背景執行，避免阻塞 handler；完成後主動把結果發回此對話
+        chat_id = update.effective_chat.id
+        asyncio.create_task(self._run_assessment(chat_id, target, scope, profile))
+
+    async def _run_assessment(self, chat_id, target, scope, profile) -> None:
+        """背景執行授權評估並把結果回報到對話（誠實呈現）。"""
         try:
             result = await self._scanner.scan(target, scope, profile)
-            vulns = result.get("vulnerabilities", []) if isinstance(result, dict) else getattr(result, "vulnerabilities", [])
-            await update.message.reply_text(f"掃描完成。發現項目數：{len(vulns)}")
+            vulns = (result.get("vulnerabilities", [])
+                     if isinstance(result, dict)
+                     else getattr(result, "vulnerabilities", []))
+            tools_used = getattr(result, "tools_used", []) if not isinstance(result, dict) else []
+            # severity 分佈
+            dist: dict[str, int] = {}
+            for v in vulns:
+                sev = v.severity.value if hasattr(v, "severity") else "info"
+                dist[sev] = dist.get(sev, 0) + 1
+            dist_str = ", ".join(f"{k}:{n}" for k, n in dist.items()) if dist else "無"
+            tools_str = ", ".join(t.value for t in tools_used) if tools_used else "（無）"
+            lines = [
+                f"✅ 評估完成：{target}",
+                f"編排工具：{tools_str}",
+                f"發現項目（去重後）：{len(vulns)}",
+                f"嚴重度分佈：{dist_str}",
+            ]
+            if not vulns:
+                lines.append("（本次評估未發現項目——這是真實結果）")
+            msg = "\n".join(lines)
         except Exception as exc:
-            await update.message.reply_text(f"掃描結束（{type(exc).__name__}）：{exc}")
+            msg = f"評估結束（{type(exc).__name__}）：{exc}"
+        try:
+            await self._app.bot.send_message(chat_id=int(chat_id), text=msg)
+        except Exception:
+            logger.warning("assessment result send failed")
 
     async def cmd_cancel(self, update, context) -> None:
         if not self._authorized(update.effective_user.id):
