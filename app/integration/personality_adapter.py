@@ -333,6 +333,16 @@ class PersonalityAdapter:
             return []
         return self._history.get(key, [])
 
+    def reset_history(self, key) -> None:
+        """清掉指定 chat 的短期對話脈絡（供 /reset 開新話題用）。
+
+        只清短期 history 與演化計數器；長期向量對話記憶（ConversationMemory）
+        刻意保留——開新話題不等於失憶，Eliana 之後仍可語意回想過往。"""
+        if not key:
+            return
+        self._history.pop(key, None)
+        self._evolve_counter.pop(key, None)
+
     def _record(self, key, user_text, assistant_text):
         if not key:
             return

@@ -43,11 +43,13 @@ class TelegramRuntime:
         personality: Any | None = None,
         resource_monitor: Any | None = None,
         scanner: Any | None = None,
+        knowledge_store: Any | None = None,
     ) -> None:
         self._cfg = _load_cfg()
         self._personality = personality
         self._rm = resource_monitor
         self._scanner = scanner
+        self._knowledge = knowledge_store
         self._pending_scan = {}   # chat_id -> target awaiting /authorize
         self._app = None
 
@@ -71,6 +73,8 @@ class TelegramRuntime:
             "/status - live system state\n"
             "/local /cloud /auto - 切換 LLM 路由模式\n"
             "/persona /undo /evolve - 人格演化查看與控制\n"
+            "/learn <內容> - 教 Eliana 一條知識（收進知識庫，不聊天）\n"
+            "/reset - 開新話題（清短期脈絡；長期記憶保留）\n"
             "/chat <message> - talk to Eliana (local LLM + persona)\n"
             "/help - this message")
 
@@ -244,6 +248,43 @@ class TelegramRuntime:
             self._personality._evolve_enabled = (arg == "on")
         await update.message.reply_text(f"人格演化已{'開啟' if arg=='on' else '暫停'}。")
 
+    async def cmd_learn(self, update, context) -> None:
+        """教 Eliana 一條知識：寫進知識庫（面板「你教的」），不走對話生成、
+        不帶對話歷史、不觸發演化——這就是把「教它」和「跟它聊」分流。"""
+        if not self._authorized(update.effective_user.id):
+            return await self._reply_unauthorized(update)
+        if self._knowledge is None:
+            return await update.message.reply_text("知識庫未啟用。")
+        text = " ".join(context.args) if context.args else ""
+        if not text.strip():
+            return await update.message.reply_text(
+                "用法：/learn <要我記住的知識>\n（這會收進知識庫，不會當成聊天回覆）")
+        try:
+            ok = self._knowledge.learn(text, source="telegram")
+            cnt = self._knowledge.count()
+        except Exception as exc:  # noqa: BLE001
+            return await update.message.reply_text(f"記下失敗：{exc}")
+        if ok:
+            await update.message.reply_text(
+                f"已記下，收進知識庫（你教的）。目前這類知識共 {cnt} 筆。")
+        else:
+            await update.message.reply_text(
+                "沒記成——embedding 或知識庫寫入失敗，這條沒存進去（誠實回報）。")
+
+    async def cmd_reset(self, update, context) -> None:
+        """開新話題：清掉這個對話的短期脈絡；長期向量記憶保留。"""
+        if not self._authorized(update.effective_user.id):
+            return await self._reply_unauthorized(update)
+        if self._personality is None:
+            return await update.message.reply_text("reset: personality not wired")
+        try:
+            self._personality.reset_history(str(update.effective_chat.id))
+        except Exception as exc:  # noqa: BLE001
+            return await update.message.reply_text(f"reset 失敗：{exc}")
+        await update.message.reply_text(
+            "好，開新話題了。短期脈絡清掉，接下來不會接著剛剛的話題。\n"
+            "（長期記憶保留，之後需要我還是回想得起來。）")
+
     async def cmd_status(self, update, context) -> None:
         if not self._authorized(update.effective_user.id):
             return await self._reply_unauthorized(update)
@@ -335,6 +376,8 @@ class TelegramRuntime:
         app.add_handler(CommandHandler("scan", self.cmd_scan))
         app.add_handler(CommandHandler("authorize", self.cmd_authorize))
         app.add_handler(CommandHandler("cancel", self.cmd_cancel))
+        app.add_handler(CommandHandler("learn", self.cmd_learn))
+        app.add_handler(CommandHandler("reset", self.cmd_reset))
         app.add_handler(CommandHandler("chat", self.cmd_chat))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
         self._app = app
@@ -393,12 +436,22 @@ def build_subsystems():
     except Exception as exc:
         logger.warning("scan subsystem not wired: %s", exc)
     rm = ResourceMonitor(ssh_channel=ssh)
-    return personality, rm, scanner
+    # /learn knowledge store: writes taught knowledge into the dashboard's
+    # knowledge base (ariel_knowledge = 面板「你教的」). Separate persist dir
+    # from conversation memory; ELIANA_KNOWLEDGE__DIR points at it.
+    knowledge_store = None
+    try:
+        from app.integration.knowledge_store import KnowledgeStore
+        knowledge_store = KnowledgeStore()
+    except Exception as exc:
+        logger.warning("knowledge store not wired: %s", exc)
+    return personality, rm, scanner, knowledge_store
 
 
 def main() -> int:
-    personality, rm, scanner = build_subsystems()
-    rt = TelegramRuntime(personality=personality, resource_monitor=rm, scanner=scanner)
+    personality, rm, scanner, knowledge_store = build_subsystems()
+    rt = TelegramRuntime(personality=personality, resource_monitor=rm,
+                         scanner=scanner, knowledge_store=knowledge_store)
     app = rt.build()
 
     async def _post_init(application):
