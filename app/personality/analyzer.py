@@ -89,10 +89,9 @@ class ConversationAnalyzer:
             data = json.loads(_extract_json(raw))
             return AnalysisResult(
                 conversation_id=conv_id,
-                tone_signals={k: float(v) for k, v in
-                              data.get("tone_signals", {}).items()},
-                preference_signals={k: float(v) for k, v in
-                                    data.get("preference_signals", {}).items()},
+                tone_signals=_coerce_signal_map(data.get("tone_signals", {})),
+                preference_signals=_coerce_signal_map(
+                    data.get("preference_signals", {})),
                 summary=str(data.get("summary", "")),
             )
         except (json.JSONDecodeError, ValueError, TypeError):
@@ -159,13 +158,91 @@ def _clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
 
 
+def _strip_code_fence(raw: str) -> str:
+    """移除 markdown code fence（```json ... ``` 或 ``` ... ```）。"""
+    import re
+    text = raw.strip()
+    # ```json\n...\n```  或  ```\n...\n```
+    m = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    return text
+
+
+def _balanced_json_object(text: str) -> Optional[str]:
+    """從第一個 '{' 起，依括號配對找出平衡的 JSON 物件（忽略字串內的括號）。
+    比 rfind('}') 穩健：避免抓到後續說明文字裡的 '}' 或多個物件黏在一起。"""
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
+
+
 def _extract_json(raw: str) -> str:
-    """從 LLM 回應中萃取第一個 JSON 物件（容忍前後雜訊）。"""
-    start = raw.find("{")
-    end = raw.rfind("}")
-    if start == -1 or end == -1 or end < start:
-        raise ValueError("回應不含 JSON 物件")
-    return raw[start:end + 1]
+    """從 LLM 回應萃取 JSON 物件，容忍 markdown fence / 前後雜訊 / 尾逗號。"""
+    import re
+    text = _strip_code_fence(raw or "")
+    candidate = _balanced_json_object(text)
+    if candidate is None:
+        # 退回舊式 find/rfind
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or end < start:
+            raise ValueError("回應不含 JSON 物件")
+        candidate = text[start:end + 1]
+    # 清除物件/陣列結尾的尾逗號（小模型常見）：  , }  ->  }
+    candidate = re.sub(r",\s*([}\]])", r"\1", candidate)
+    return candidate
+
+
+def _coerce_float(v) -> Optional[float]:
+    """容錯把 LLM 的值轉 float。無法轉（如 'high'/null/空）回 None（跳過該鍵）。"""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        s = v.strip().rstrip("%").replace("+", "")
+        try:
+            return float(s)
+        except ValueError:
+            return None
+    return None
+
+
+def _coerce_signal_map(d) -> dict:
+    """把 signal dict 的值容錯轉 float，丟棄無法轉的鍵（不讓一個壞值毀掉整份解析）。"""
+    if not isinstance(d, dict):
+        return {}
+    out = {}
+    for k, v in d.items():
+        f = _coerce_float(v)
+        if f is not None:
+            out[str(k)] = f
+    return out
 
 
 def _safe_parse_patterns(raw: str) -> list[dict]:
