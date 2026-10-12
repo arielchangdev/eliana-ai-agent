@@ -10,17 +10,19 @@
 * 輪詢間隔預設 10 秒：WEAPON（kali）每輪要走一次 SSH + 遠端 psutil，間隔太密
   會給 kali 不必要負載，10 秒已足夠面板即時感。
 
-本階段範圍
-----------
-只接「真實 ResourceMonitor」。Task_Scheduler / learning-engine 的真實 provider
-不在本階段，task / knowledge / agent_state 暫時沿用 Mock，面板資源區顯示真實
-雙機數據，其餘區塊顯示 Mock 佔位。
+資料源現況（階段 4 延伸・第一段）
+----------------------------------
+* resource  : 真實 ResourceMonitor（CORE 本地 + WEAPON SSH）
+* knowledge : 真實 ChromaDB 知識庫 collection 計數（誠實：沒有就顯示 0）
+* agent     : 從掃描活動推導（scans.status='running' -> running，否則 idle）
+* task      : 仍為 Mock，待第二段（修 ScanEngine 接 db + 讀 scans）再接真實
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
+import sqlite3
 from datetime import datetime, timezone
 
 # 核心（真實資料來源）
@@ -28,13 +30,15 @@ from eliana_core.services.resource_monitor import ResourceMonitor
 from eliana_core.services.ssh_channel import SSHChannel
 from eliana_core.models.task import HostTarget
 
-# Dashboard 端型別與既有 Mock（非資源部分沿用）
-from app.dashboard.models import SystemMetrics as DashMetrics
-from app.dashboard.main import build_components
-from app.dashboard.services.adapters import (
-    MockTaskScheduler,
-    MockKnowledgeStats,
+# Dashboard 端型別與既有 Mock（尚未接真實的部分沿用）
+from app.dashboard.models import (
+    SystemMetrics as DashMetrics,
+    KnowledgeStats,
+    AgentStatus,
+    AgentState,
 )
+from app.dashboard.main import build_components
+from app.dashboard.services.adapters import MockTaskScheduler
 
 logger = logging.getLogger("eliana.dashboard.real")
 
@@ -46,7 +50,35 @@ _HOST_LABEL = {
 
 POLL_INTERVAL = float(os.environ.get("ELIANA_DASH__POLL_SECONDS", "10"))
 
+# 知識庫（ChromaDB）：持久化目錄與要計數的 collection（逗號分隔）
+KNOWLEDGE_CHROMA_DIR = os.environ.get(
+    "ELIANA_DASH__KNOWLEDGE_DIR", "YOUR_CHROMA_DIR")
+KNOWLEDGE_COLLECTIONS = [
+    c.strip() for c in os.environ.get(
+        "ELIANA_DASH__KNOWLEDGE_COLLECTIONS",
+        "eliana_knowledge,ariel_knowledge").split(",") if c.strip()
+]
 
+# bounty 掃描資料庫（agent 狀態推導 + 第二段 task provider）
+BOUNTY_DB = os.environ.get("ELIANA_BOUNTY__DB", "YOUR_BOUNTY_DB")
+
+# 對話記憶（ChromaDB）與人格資料庫（成長狀態）
+MEMORY_CHROMA_DIR = os.environ.get("ELIANA_DASH__MEMORY_DIR", "YOUR_MEMORY_DIR")
+MEMORY_COLLECTION = os.environ.get(
+    "ELIANA_DASH__MEMORY_COLLECTION", "eliana_conversations")
+PERSONALITY_DB = os.environ.get(
+    "ELIANA_DASH__PERSONALITY_DB", "YOUR_PERSONALITY_DB")
+
+# 知識庫 collection -> 人話標籤（不在面板露出技術 collection 名）
+_KNOWLEDGE_LABELS = {
+    "eliana_knowledge": "對話中學到",
+    "ariel_knowledge": "你教的",
+}
+
+
+# --------------------------------------------------------------------------- #
+# resource（真實 ResourceMonitor）
+# --------------------------------------------------------------------------- #
 def _aware_utc(dt) -> datetime:
     """正規化為 aware UTC。核心的本地指標 timestamp 可能是 naive，
     直接丟給 aggregator 會在 (now - ts) 觸發 naive/aware 相減 TypeError。"""
@@ -143,23 +175,185 @@ class ResourcePoller:
                 self._task.cancel()
 
 
-async def build_real_components(db_path: str = "data/dashboard.db"):
-    """建立接真實 ResourceMonitor 的 dashboard components，附帶輪詢器。
+# --------------------------------------------------------------------------- #
+# knowledge（真實 ChromaDB 計數）
+# --------------------------------------------------------------------------- #
+def _count_knowledge_sync() -> tuple[int, dict]:
+    """同步讀 ChromaDB 各 collection 計數。只需要數量，不實例化完整
+    VectorStore（避免拉 embedder 模型）。讀不到就誠實回 0。"""
+    try:
+        import chromadb
+        client = chromadb.PersistentClient(path=KNOWLEDGE_CHROMA_DIR)
+    except Exception as exc:  # 目錄不存在 / chroma 載入失敗
+        logger.warning("knowledge chroma open failed: %s", exc)
+        return 0, {}
 
+    per_collection: dict[str, int] = {}
+    total = 0
+    for name in KNOWLEDGE_COLLECTIONS:
+        try:
+            col = client.get_collection(name)
+            n = col.count()
+            per_collection[name] = n
+            total += n
+        except Exception:
+            # collection 不存在就跳過（誠實：不存在不計入）
+            per_collection[name] = 0
+    return total, per_collection
+
+
+def _count_memory_sync() -> int:
+    """對話記憶（長期記憶）段數。讀不到就 0。"""
+    try:
+        import chromadb
+        client = chromadb.PersistentClient(path=MEMORY_CHROMA_DIR)
+        return int(client.get_collection(MEMORY_COLLECTION).count())
+    except Exception as exc:
+        logger.warning("memory count failed: %s", exc)
+        return 0
+
+
+def _personality_growth_sync() -> dict:
+    """讀 personality.db：目前版本、是否演化過、關鍵參數（人話）。
+
+    誠實：evolution_log 為空 -> 顯示尚未演化；只讀最新版本快照的參數。
+    """
+    out = {
+        "版本": 0,
+        "已演化次數": 0,
+        "主動性": None,
+        "幽默感": None,
+        "表情頻率": None,
+    }
+    try:
+        conn = sqlite3.connect(PERSONALITY_DB)
+        try:
+            # 目前版本號 = personality_versions 最大 version_number
+            row = conn.execute(
+                "SELECT version_number, profile_snapshot FROM personality_versions"
+                " ORDER BY version_number DESC LIMIT 1"
+            ).fetchone()
+            if row:
+                out["版本"] = int(row[0])
+                try:
+                    import json
+                    snap = json.loads(row[1])
+                    rs = snap.get("response_strategy", {})
+                    comm = snap.get("communication", {})
+                    out["主動性"] = rs.get("proactiveness")
+                    out["幽默感"] = rs.get("humor_ratio")
+                    out["表情頻率"] = comm.get("emoji_frequency")
+                except Exception:
+                    pass
+            # 實際發生的演化次數 = evolution_log 中 status 已套用的筆數
+            n = conn.execute(
+                "SELECT COUNT(*) FROM evolution_log WHERE status = 'applied'"
+            ).fetchone()
+            out["已演化次數"] = int(n[0]) if n else 0
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("personality growth read failed: %s", exc)
+    return out
+
+
+async def real_knowledge_provider() -> KnowledgeStats:
+    """回傳「Eliana 成長狀態」。全部真實，沒資料就 0 / 尚未開始，不塞假數字。
+
+    承載方式（不改既有 schema）：
+      * total_fragments        : 知識總筆數
+      * category_distribution  : 人話知識分類 {"對話中學到":6, "你教的":4}
+      * strategy_summary       : 成長摘要（長期記憶段數、人格版本/演化/參數）
+    前端 KnowledgeStats.vue 以「成長狀態」人話呈現這些鍵。
+    """
+    total, per_collection = await asyncio.to_thread(_count_knowledge_sync)
+    memory_segments = await asyncio.to_thread(_count_memory_sync)
+    growth = await asyncio.to_thread(_personality_growth_sync)
+
+    # collection 技術名 -> 人話標籤
+    friendly = {}
+    for name, n in per_collection.items():
+        friendly[_KNOWLEDGE_LABELS.get(name, name)] = n
+
+    strategy_summary = {
+        "長期記憶段數": memory_segments,
+        "人格版本": growth["版本"],
+        "已演化次數": growth["已演化次數"],
+        "主動性": growth["主動性"],
+        "幽默感": growth["幽默感"],
+        "表情頻率": growth["表情頻率"],
+    }
+
+    return KnowledgeStats(
+        total_fragments=total,
+        category_distribution=friendly,
+        daily_growth=[],
+        last_crawl_time=None,
+        last_crawl_status=None,
+        next_crawl_time=None,
+        strategy_summary=strategy_summary,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# agent state（從掃描活動推導）
+# --------------------------------------------------------------------------- #
+def _running_scans_sync() -> int:
+    """查 bounty.db 是否有 status='running' 的掃描。讀不到就當 0（idle）。"""
+    try:
+        conn = sqlite3.connect(BOUNTY_DB)
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM scans WHERE status = 'running'"
+            ).fetchone()
+            return int(row[0]) if row else 0
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("agent-state scans query failed: %s", exc)
+        return 0
+
+
+async def real_agent_state_provider() -> AgentStatus:
+    """從掃描活動推導 agent 狀態：有掃描在跑 -> running，否則 idle。
+
+    目前沒有單一權威狀態來源；以「bounty.db 是否有 running 掃描」作為
+    最務實的真實信號。沒有掃描在跑時誠實顯示 idle。
+    """
+    running = await asyncio.to_thread(_running_scans_sync)
+    if running > 0:
+        return AgentStatus(
+            state=AgentState.RUNNING,
+            current_task_name=f"{running} scan(s) running",
+            current_task_progress=0.0,
+        )
+    return AgentStatus(
+        state=AgentState.IDLE,
+        current_task_name=None,
+        current_task_progress=0.0,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 組裝
+# --------------------------------------------------------------------------- #
+async def build_real_components(db_path: str = "data/dashboard.db"):
+    """建立接真實資料源的 dashboard components，附帶資源輪詢器。
+
+    第一段：resource / knowledge / agent_state 為真實；task 仍 Mock。
     回傳 (components, poller)；呼叫端負責在 app 生命週期啟停 poller。
     """
     ssh = _build_ssh()
     monitor = ResourceMonitor(ssh_channel=ssh)
 
     mock_task = MockTaskScheduler()
-    mock_know = MockKnowledgeStats()
 
     components = await build_components(
         db_path=db_path,
         resource_provider=None,  # 走 push，不需 callable
-        task_provider=mock_task.get_recent_tasks,
-        knowledge_provider=mock_know.get_stats,
-        agent_state_provider=mock_task.get_agent_status,
+        task_provider=mock_task.get_recent_tasks,       # 第二段才接真實
+        knowledge_provider=real_knowledge_provider,     # 真實
+        agent_state_provider=real_agent_state_provider,  # 真實
     )
     poller = ResourcePoller(components.aggregator, monitor)
     return components, poller

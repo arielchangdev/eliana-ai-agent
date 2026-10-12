@@ -37,11 +37,7 @@ export interface KnowledgeStats {
   lastCrawlTime: string | null
   lastCrawlStatus: string | null
   nextCrawlTime: string | null
-  strategySummary: {
-    total: number
-    highEfficiency: number
-    needsOptimization: number
-  }
+  strategySummary: Record<string, number | string | null>
 }
 
 export interface ResourceAlert {

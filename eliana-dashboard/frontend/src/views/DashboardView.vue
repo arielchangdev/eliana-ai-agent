@@ -56,7 +56,7 @@ onUnmounted(() => {
     </section>
 
     <section class="dashboard__section">
-      <h2>知識庫統計</h2>
+      <h2>成長狀態</h2>
       <KnowledgeStats :stats="store.knowledgeStats" />
     </section>
   </div>
