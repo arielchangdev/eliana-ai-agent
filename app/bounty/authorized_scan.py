@@ -111,4 +111,20 @@ class AuthorizedScanner:
         scan_host = norm.split("://")[-1].split("/")[0]
         target = ScanTarget(program_id="manual", target_url=scan_host,
                             target_type=TargetType.WEB_APP)
-        return await self._engine.execute_scan(target, profile)
+
+        # Persistence: ScanEngine.execute_scan only writes scan/vuln records when
+        # it has a db connection. build_subsystems() is sync and cannot open an
+        # async aiosqlite connection, so we open one here (async context) using
+        # the same bounty.db the authorization records live in, inject it into
+        # the engine for the duration of the scan, then close it. If the engine
+        # already has a db (e.g. real test wiring), we leave it untouched.
+        if getattr(self._engine, "_db", None) is not None:
+            return await self._engine.execute_scan(target, profile)
+
+        import aiosqlite
+        async with aiosqlite.connect(self._db_path) as conn:
+            self._engine._db = conn
+            try:
+                return await self._engine.execute_scan(target, profile)
+            finally:
+                self._engine._db = None

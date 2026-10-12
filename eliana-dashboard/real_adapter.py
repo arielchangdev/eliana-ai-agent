@@ -15,7 +15,7 @@
 * resource  : 真實 ResourceMonitor（CORE 本地 + WEAPON SSH）
 * knowledge : 真實 ChromaDB 知識庫 collection 計數（誠實：沒有就顯示 0）
 * agent     : 從掃描活動推導（scans.status='running' -> running，否則 idle）
-* task      : 仍為 Mock，待第二段（修 ScanEngine 接 db + 讀 scans）再接真實
+* task      : 真實掃描記錄（bounty.db scans）；空就誠實顯示「尚無掃描任務」
 """
 from __future__ import annotations
 
@@ -36,9 +36,10 @@ from app.dashboard.models import (
     KnowledgeStats,
     AgentStatus,
     AgentState,
+    TaskTimelineItem,
+    TaskResultStatus,
 )
 from app.dashboard.main import build_components
-from app.dashboard.services.adapters import MockTaskScheduler
 
 logger = logging.getLogger("eliana.dashboard.real")
 
@@ -335,24 +336,94 @@ async def real_agent_state_provider() -> AgentStatus:
 
 
 # --------------------------------------------------------------------------- #
+# task（真實掃描記錄 -> 任務時間線）
+# --------------------------------------------------------------------------- #
+# scans.status -> dashboard TaskResultStatus
+_SCAN_STATUS_MAP = {
+    "queued": TaskResultStatus.RUNNING,
+    "running": TaskResultStatus.RUNNING,
+    "completed": TaskResultStatus.SUCCESS,
+    "failed": TaskResultStatus.FAILED,
+    "timeout": TaskResultStatus.TIMEOUT,
+    "cancelled": TaskResultStatus.CANCELLED,
+}
+
+
+def _parse_dt(s):
+    from datetime import datetime
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+
+def _read_scans_sync(limit: int = 100) -> list:
+    """讀 bounty.db 的 scans 表，轉成 dashboard TaskTimelineItem。
+
+    誠實：表為空或讀不到就回空 list（面板顯示「尚無掃描任務」）。
+    """
+    try:
+        conn = sqlite3.connect(BOUNTY_DB)
+    except Exception as exc:
+        logger.warning("task scans open failed: %s", exc)
+        return []
+    items: list[TaskTimelineItem] = []
+    try:
+        rows = conn.execute(
+            "SELECT id, target_url, status, started_at, completed_at,"
+            " duration_seconds FROM scans ORDER BY started_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    except Exception as exc:
+        logger.warning("task scans query failed: %s", exc)
+        conn.close()
+        return []
+    finally:
+        pass
+    conn.close()
+
+    now_fallback = datetime.now(timezone.utc)
+    for sid, target_url, status, started_at, completed_at, dur in rows:
+        start = _parse_dt(started_at) or now_fallback
+        items.append(TaskTimelineItem(
+            task_id=sid,
+            name=f"掃描 {target_url}",
+            status=_SCAN_STATUS_MAP.get(status, TaskResultStatus.RUNNING),
+            start_time=start,
+            end_time=_parse_dt(completed_at),
+            duration_seconds=dur,
+            target=target_url,
+            strategy=None,
+            error_message=None,
+            output_summary=None,
+        ))
+    return items
+
+
+async def real_task_provider() -> list:
+    """任務時間線 = 真實掃描記錄（bounty.db scans）。空就誠實回空。"""
+    return await asyncio.to_thread(_read_scans_sync)
+
+
+# --------------------------------------------------------------------------- #
 # 組裝
 # --------------------------------------------------------------------------- #
 async def build_real_components(db_path: str = "data/dashboard.db"):
     """建立接真實資料源的 dashboard components，附帶資源輪詢器。
 
-    第一段：resource / knowledge / agent_state 為真實；task 仍 Mock。
+    resource / knowledge / agent_state / task 全部為真實資料源。
     回傳 (components, poller)；呼叫端負責在 app 生命週期啟停 poller。
     """
     ssh = _build_ssh()
     monitor = ResourceMonitor(ssh_channel=ssh)
 
-    mock_task = MockTaskScheduler()
-
     components = await build_components(
         db_path=db_path,
         resource_provider=None,  # 走 push，不需 callable
-        task_provider=mock_task.get_recent_tasks,       # 第二段才接真實
-        knowledge_provider=real_knowledge_provider,     # 真實
+        task_provider=real_task_provider,                # 真實：scans 表
+        knowledge_provider=real_knowledge_provider,      # 真實
         agent_state_provider=real_agent_state_provider,  # 真實
     )
     poller = ResourcePoller(components.aggregator, monitor)
