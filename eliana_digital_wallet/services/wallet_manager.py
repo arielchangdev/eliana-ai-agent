@@ -77,8 +77,9 @@ class WalletManager:
 
     # ----- 地址產生 ------------------------------------------------------- #
     async def generate_address(self) -> str:
-        """產生 BIP-84 Native SegWit 地址（bc1q 前綴）。
+        """產生 BIP-84 Native SegWit 地址。
 
+        前綴依設定的 network 而定：testnet -> tb1q，mainnet -> bc1q。
         流程：unlock → createnewaddress → 驗證格式 → lock。
         """
         unlocked = False
@@ -94,10 +95,24 @@ class WalletManager:
             if unlocked:
                 await self.key_vault.lock()
 
-    @staticmethod
-    def _is_bip84_address(address: str) -> bool:
-        """BIP-84 Native SegWit：bc1q 前綴 + 有效 bech32 編碼。"""
-        return address.startswith("bc1q") and is_valid_bech32_address(address)
+    def _expected_hrp_prefixes(self) -> tuple[str, ...]:
+        """依 network 回傳可接受的 BIP-84 地址前綴。
+
+        不寫死：testnet 接受 tb1q、mainnet 接受 bc1q。未知/未設定時兩者
+        皆接受（寬鬆），但實際網路由 daemon 的 network 鎖定把關。
+        """
+        network = str(getattr(self.config, "network", "") or "").lower()
+        if network == "mainnet":
+            return ("bc1q",)
+        if network == "testnet":
+            return ("tb1q",)
+        return ("tb1q", "bc1q")
+
+    def _is_bip84_address(self, address: str) -> bool:
+        """BIP-84 Native SegWit：network 對應前綴 + 有效 bech32 編碼。"""
+        if not any(address.startswith(p) for p in self._expected_hrp_prefixes()):
+            return False
+        return is_valid_bech32_address(address)
 
     # ----- 餘額 ----------------------------------------------------------- #
     async def get_balance(self) -> WalletBalance:

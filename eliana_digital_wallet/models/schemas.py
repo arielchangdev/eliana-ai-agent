@@ -28,6 +28,9 @@ class WalletConfig(BaseModel):
     sync_interval_seconds: int = 300
     max_failover_attempts: int = 3
     wallet_path: Path
+    # Bitcoin network: "testnet" (default, safe) or "mainnet". Governs which
+    # BIP-84 address prefix is accepted (tb1q for testnet, bc1q for mainnet).
+    network: str = "testnet"
 
 
 class KeyVaultConfig(BaseModel):
