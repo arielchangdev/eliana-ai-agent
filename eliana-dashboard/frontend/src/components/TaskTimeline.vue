@@ -135,6 +135,13 @@ function hasReport(f: TaskFinding): boolean {
               {{ f.title }}
               <span v-if="f.cve_id" class="finding__cve">{{ f.cve_id }}</span>
             </div>
+            <!-- MITRE ATT&CK 分類標記（描述發現所屬技術類別，非攻擊）-->
+            <div v-if="f.attack_technique_id" class="finding__attack" data-testid="attack-tag">
+              <span class="attack-badge">ATT&CK</span>
+              {{ f.attack_technique_id }}
+              <template v-if="f.attack_technique_name"> · {{ f.attack_technique_name }}</template>
+              <span v-if="f.attack_tactic" class="finding__tactic">（{{ f.attack_tactic }}）</span>
+            </div>
 
             <!-- 有報告：Eliana 敘述分欄 + CVSS -->
             <div v-if="hasReport(f)" class="report">
@@ -205,6 +212,10 @@ function hasReport(f: TaskFinding): boolean {
 .finding { margin-bottom: 12px; }
 .finding__title { font-size: 14px; margin-bottom: 4px; }
 .finding__cve { font-size: 11px; color: #888; margin-left: 6px; }
+.finding__attack { font-size: 12px; color: #444; margin: 2px 0 6px; }
+.attack-badge { font-size: 10px; font-weight: 700; color: #fff; background: #6a1b9a;
+  padding: 1px 5px; border-radius: 3px; margin-right: 4px; }
+.finding__tactic { color: #777; }
 .report { background: #fafafa; border-radius: 6px; padding: 8px; }
 .report--none { color: #999; font-size: 13px; font-style: italic; }
 .report__cvss { font-weight: 600; margin-bottom: 6px; }

@@ -64,7 +64,10 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     evidence TEXT DEFAULT '',
     tool_source TEXT NOT NULL,
     raw_output TEXT DEFAULT '',
-    discovered_at TEXT NOT NULL
+    discovered_at TEXT NOT NULL,
+    attack_technique_id TEXT,
+    attack_technique_name TEXT,
+    attack_tactic TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_vulns_severity ON vulnerabilities(severity);
@@ -104,7 +107,10 @@ CREATE TABLE IF NOT EXISTS reports (
     estimated_bounty_max REAL DEFAULT 0.0,
     status TEXT NOT NULL DEFAULT 'draft',
     llm_quality_score REAL DEFAULT 0.0,
-    generated_at TEXT NOT NULL
+    generated_at TEXT NOT NULL,
+    attack_technique_id TEXT,
+    attack_technique_name TEXT,
+    attack_tactic TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status);

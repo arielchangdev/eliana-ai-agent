@@ -761,6 +761,19 @@ class ScanEngine:
         # Finalize: aggregate + de-duplicate findings across all tools so a
         # multi-tool assessment yields one consolidated, correlated list.
         all_vulnerabilities = deduplicate_findings(all_vulnerabilities)
+
+        # Classify each finding against MITRE ATT&CK (labeling only, not attack).
+        from app.bounty.attack_mapping import map_finding_to_attack
+        for _v in all_vulnerabilities:
+            try:
+                tech = map_finding_to_attack(
+                    _v.tool_source, _v.title or "", _v.description or "")
+                if tech is not None:
+                    _v.attack_technique_id = tech.technique_id
+                    _v.attack_technique_name = tech.technique_name
+                    _v.attack_tactic = f"{tech.tactic_id} {tech.tactic_name}"
+            except Exception as _exc:
+                logger.warning("attack mapping failed: %s", _exc)
         completed_at = datetime.now(timezone.utc)
         duration = (completed_at - started_at).total_seconds()
         result = ScanResult(
@@ -785,12 +798,17 @@ class ScanEngine:
                 await self._db.execute(
                     "INSERT INTO vulnerabilities"
                     " (id, scan_id, cve_id, severity, title, description,"
-                    " affected_endpoint, evidence, tool_source, raw_output, discovered_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " affected_endpoint, evidence, tool_source, raw_output,"
+                    " discovered_at, attack_technique_id, attack_technique_name,"
+                    " attack_tactic)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (vuln.id, scan_id, vuln.cve_id, vuln.severity.value,
                      vuln.title, vuln.description, vuln.affected_endpoint,
                      vuln.evidence, vuln.tool_source.value, vuln.raw_output,
-                     vuln.discovered_at.isoformat()),
+                     vuln.discovered_at.isoformat(),
+                     getattr(vuln, "attack_technique_id", None),
+                     getattr(vuln, "attack_technique_name", None),
+                     getattr(vuln, "attack_tactic", None)),
                 )
             await self._db.commit()
 

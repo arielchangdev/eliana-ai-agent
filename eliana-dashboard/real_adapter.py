@@ -450,7 +450,8 @@ def _read_scans_sync(limit: int = 100) -> list:
                 "SELECT v.id, v.severity, v.title, v.cve_id,"
                 " r.cvss_score, r.cvss_vector, r.description,"
                 " r.reproduction_steps, r.impact_assessment, r.remediation,"
-                " r.status"
+                " r.status,"
+                " v.attack_technique_id, v.attack_technique_name, v.attack_tactic"
                 " FROM vulnerabilities v"
                 " LEFT JOIN reports r ON r.vulnerability_id = v.id"
                 " WHERE v.scan_id = ?", (sid,)).fetchall()
@@ -466,6 +467,10 @@ def _read_scans_sync(limit: int = 100) -> list:
                 vulns.append({
                     "severity": vr[1], "title": vr[2], "cve_id": vr[3],
                     "report": report,
+                    # MITRE ATT&CK classification (labeling only)
+                    "attack_technique_id": vr[11],
+                    "attack_technique_name": vr[12],
+                    "attack_tactic": vr[13],
                 })
         except Exception as exc:
             logger.warning("task vuln join failed scan=%s: %s", sid, exc)

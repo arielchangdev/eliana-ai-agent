@@ -40,6 +40,9 @@ export interface TaskFinding {
   title: string
   cve_id: string | null
   report: FindingReport | null
+  attack_technique_id?: string | null
+  attack_technique_name?: string | null
+  attack_tactic?: string | null
 }
 
 export interface TaskTimelineItem {

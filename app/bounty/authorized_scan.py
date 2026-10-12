@@ -245,14 +245,18 @@ class AuthorizedScanner:
             " (id, vulnerability_id, program_id, platform, title, description,"
             " reproduction_steps, impact_assessment, remediation, cvss_score,"
             " cvss_vector, estimated_bounty_min, estimated_bounty_max, status,"
-            " llm_quality_score, generated_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " llm_quality_score, generated_at, attack_technique_id,"
+            " attack_technique_name, attack_tactic)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (report.id, report.vulnerability_id, report.program_id,
              report.platform.value, report.title, report.description,
              report.reproduction_steps, report.impact_assessment,
              report.remediation, float(report.cvss.base_score),
              report.cvss.vector_string, float(report.estimated_bounty.min_usd),
              float(report.estimated_bounty.max_usd), report.status.value,
-             float(report.llm_quality_score), report.generated_at.isoformat()),
+             float(report.llm_quality_score), report.generated_at.isoformat(),
+             getattr(report, "attack_technique_id", None),
+             getattr(report, "attack_technique_name", None),
+             getattr(report, "attack_tactic", None)),
         )
         await conn.commit()

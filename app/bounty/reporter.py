@@ -581,6 +581,29 @@ class ReportGenerator:
             if evidence_entry not in report.evidence_attachments:
                 report.evidence_attachments.append(evidence_entry)
 
+        # Carry the finding's MITRE ATT&CK classification onto the report
+        # (labeling only — describes which technique category the finding maps
+        # to; not an attack instruction). If the finding wasn't classified
+        # upstream, map it here as a fallback.
+        tech_id = getattr(vulnerability, "attack_technique_id", None)
+        if tech_id:
+            report.attack_technique_id = tech_id
+            report.attack_technique_name = getattr(
+                vulnerability, "attack_technique_name", None)
+            report.attack_tactic = getattr(vulnerability, "attack_tactic", None)
+        else:
+            try:
+                from app.bounty.attack_mapping import map_finding_to_attack
+                tech = map_finding_to_attack(
+                    vulnerability.tool_source,
+                    vulnerability.title or "", vulnerability.description or "")
+                if tech is not None:
+                    report.attack_technique_id = tech.technique_id
+                    report.attack_technique_name = tech.technique_name
+                    report.attack_tactic = f"{tech.tactic_id} {tech.tactic_name}"
+            except Exception:
+                pass
+
         return report
 
     async def fallback_to_template(

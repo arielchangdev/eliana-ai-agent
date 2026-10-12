@@ -164,6 +164,10 @@ class Vulnerability:
     tool_source: ScanTool = ScanTool.NUCLEI
     raw_output: str = ""
     discovered_at: datetime = field(default_factory=datetime.utcnow)
+    # MITRE ATT&CK 分類標記（描述此發現所屬技術類別，非攻擊）。可選。
+    attack_technique_id: Optional[str] = None    # 例 "T1046"
+    attack_technique_name: Optional[str] = None  # 例 "Network Service Discovery"
+    attack_tactic: Optional[str] = None          # 例 "TA0007 Discovery"
 
 
 @dataclass
@@ -262,6 +266,10 @@ class Report:
     status: ReportStatus = ReportStatus.DRAFT
     generated_at: datetime = field(default_factory=datetime.utcnow)
     llm_quality_score: float = 0.0  # 0.0~1.0
+    # MITRE ATT&CK 分類標記（報告呈現用；描述發現所屬技術類別，非攻擊）。
+    attack_technique_id: Optional[str] = None
+    attack_technique_name: Optional[str] = None
+    attack_tactic: Optional[str] = None
 
 
 @dataclass
