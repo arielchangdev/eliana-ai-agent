@@ -324,8 +324,14 @@ def build_subsystems():
                          private_key_path=weapon_key, known_hosts_path=None,
                          connect_timeout=8.0)
         engine = ScanEngine(ssh_channel=ssh)
-        bounty_db = os.environ.get("ELIANA_BOUNTY__DB", "/opt/eliana/data/bounty.db")
-        scanner = AuthorizedScanner(db_path=bounty_db, scan_engine=engine)
+        bounty_db = os.environ.get("ELIANA_BOUNTY__DB", "YOUR_BOUNTY_DB")
+        # Report narrative uses the local Ollama model (reuse the LocalLLM built
+        # above). CVSS score stays objective (cvss formula); LLM writes prose
+        # only. Local model = $0, no cloud quota, sensitive data stays on host.
+        from app.bounty.authorized_scan import OllamaReportLLM
+        report_llm = OllamaReportLLM(local_llm=llm)
+        scanner = AuthorizedScanner(db_path=bounty_db, scan_engine=engine,
+                                    report_llm=report_llm)
     except Exception as exc:
         logger.warning("scan subsystem not wired: %s", exc)
     rm = ResourceMonitor(ssh_channel=ssh)

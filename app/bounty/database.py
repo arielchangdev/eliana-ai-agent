@@ -117,6 +117,18 @@ CREATE TABLE IF NOT EXISTS change_events (
     details TEXT DEFAULT '',
     detected_at TEXT NOT NULL
 );
+
+-- 掃描進度表（ScanEngine._progress_reporter 以 scan_id 為鍵即時更新）
+CREATE TABLE IF NOT EXISTS scan_progress (
+    scan_id TEXT PRIMARY KEY REFERENCES scans(id),
+    percent_complete REAL DEFAULT 0.0,
+    vulnerabilities_found INTEGER DEFAULT 0,
+    estimated_remaining_seconds REAL DEFAULT 0.0,
+    current_tool TEXT,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_scan_progress_scan ON scan_progress(scan_id);
 """
 
 
