@@ -246,9 +246,15 @@ class AuthorizedScanner:
                         q = f"{vuln.title} {vuln.description}"
                         past = self._assessment_memory.recall_similar(q, k=2)
                         if past:
-                            ref = "\n\n--- 參考過往評估經驗（回想） ---\n" + \
+                            # 明確標示「本次引用了 N 筆過往經驗」——讓成長在報告
+                            # 裡看得見：這份報告不是從零寫的，有回想過往評估經驗。
+                            n = len(past)
+                            ref = (f"\n\n--- 參考過往評估經驗（本次引用 {n} 筆回想）"
+                                   " ---\n") + \
                                   "\n".join(f"• {p.splitlines()[0]}" for p in past)
                             report.description = (report.description or "") + ref
+                            logger.info("report_cited_past_experience",
+                                        vuln=getattr(vuln, "id", "?"), cited=n)
                     except Exception:
                         pass
                 await self._persist_report(conn, report)

@@ -230,6 +230,35 @@ def _count_assessment_sync() -> int:
         return 0
 
 
+def _assessment_growth_sync(days: int = 14) -> list:
+    """評估經驗成長趨勢：最近 days 天每日「累積評估經驗筆數」。純計數時間
+    序列，供面板畫成長曲線。誠實：沒經驗就回空 list（面板顯示尚未累積）。
+    回傳 [{"date": "YYYY-MM-DD", "cumulative": n}, ...]（由舊到新）。"""
+    import datetime as _dt
+    try:
+        import chromadb
+        client = chromadb.PersistentClient(path=MEMORY_CHROMA_DIR)
+        col = client.get_or_create_collection(ASSESSMENT_COLLECTION)
+        got = col.get(include=["metadatas"])
+        metas = got.get("metadatas") or []
+    except Exception as exc:
+        logger.warning("assessment growth read failed: %s", exc)
+        return []
+    ts_list = sorted(
+        float(m.get("ts", 0)) for m in metas if m and m.get("ts"))
+    if not ts_list:
+        return []
+    today = _dt.date.today()
+    start = today - _dt.timedelta(days=max(1, days) - 1)
+    series = []
+    for i in range(max(1, days)):
+        d = start + _dt.timedelta(days=i)
+        end_of_day = _dt.datetime.combine(d, _dt.time.max).timestamp()
+        cum = sum(1 for t in ts_list if t <= end_of_day)
+        series.append({"date": d.isoformat(), "cumulative": cum})
+    return series
+
+
 def _personality_growth_sync() -> dict:
     """讀 personality.db：目前版本、是否演化過、關鍵參數（人話）。
 
@@ -286,6 +315,7 @@ async def real_knowledge_provider() -> KnowledgeStats:
     total, per_collection = await asyncio.to_thread(_count_knowledge_sync)
     memory_segments = await asyncio.to_thread(_count_memory_sync)
     assessment_experiences = await asyncio.to_thread(_count_assessment_sync)
+    assessment_trend = await asyncio.to_thread(_assessment_growth_sync)
     growth = await asyncio.to_thread(_personality_growth_sync)
 
     # collection 技術名 -> 人話標籤
@@ -296,6 +326,7 @@ async def real_knowledge_provider() -> KnowledgeStats:
     strategy_summary = {
         "長期記憶段數": memory_segments,
         "評估經驗次數": assessment_experiences,
+        "評估經驗趨勢": assessment_trend,
         "人格版本": growth["版本"],
         "已演化次數": growth["已演化次數"],
         "主動性": growth["主動性"],

@@ -25,6 +25,34 @@ const assessmentCount = computed(() => Number(s.value['評估經驗次數'] ?? 0
 const personaVersion = computed(() => Number(s.value['人格版本'] ?? 0))
 const evolveCount = computed(() => Number(s.value['已演化次數'] ?? 0))
 
+// 評估經驗成長趨勢：每日累積筆數序列（由後端提供；沒資料就空）
+type TrendPoint = { date: string; cumulative: number }
+const assessmentTrend = computed<TrendPoint[]>(() => {
+  const raw = s.value['評估經驗趨勢']
+  return Array.isArray(raw) ? (raw as TrendPoint[]) : []
+})
+
+// 畫一條簡易 sparkline（SVG polyline）。只在趨勢有實際成長時才顯示，
+// 全 0（還沒累積）就不畫，誠實不假裝有曲線。
+const hasTrend = computed(() =>
+  assessmentTrend.value.some((p) => Number(p.cumulative) > 0),
+)
+const SPARK_W = 160
+const SPARK_H = 32
+const sparkPoints = computed(() => {
+  const pts = assessmentTrend.value
+  if (pts.length === 0) return ''
+  const maxCum = Math.max(1, ...pts.map((p) => Number(p.cumulative)))
+  const stepX = pts.length > 1 ? SPARK_W / (pts.length - 1) : 0
+  return pts
+    .map((p, i) => {
+      const x = i * stepX
+      const y = SPARK_H - (Number(p.cumulative) / maxCum) * SPARK_H
+      return `${x.toFixed(1)},${y.toFixed(1)}`
+    })
+    .join(' ')
+})
+
 // 參數值轉人話百分比；null -> 尚未設定
 function pct(v: number | string | null | undefined): string {
   if (v === null || v === undefined || v === '') return '—'
@@ -86,6 +114,21 @@ const evolveLabel = computed(() =>
           </template>
           <template v-else>尚未累積評估經驗</template>
         </p>
+        <!-- 成長趨勢 sparkline：有實際累積才畫 -->
+        <div
+          v-if="hasTrend"
+          class="growth__trend"
+          data-testid="assessment-trend"
+        >
+          <svg
+            class="growth__spark"
+            :viewBox="`0 0 ${SPARK_W} ${SPARK_H}`"
+            preserveAspectRatio="none"
+          >
+            <polyline :points="sparkPoints" />
+          </svg>
+          <span class="growth__trend-label">近 {{ assessmentTrend.length }} 天累積趨勢</span>
+        </div>
       </section>
 
       <!-- 人格演化 -->
@@ -117,4 +160,11 @@ const evolveLabel = computed(() =>
 .growth__line { margin: 2px 0; }
 .growth__traits { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 4px; }
 .growth__trait { font-size: 13px; color: #444; }
+.growth__trend { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.growth__spark { width: 160px; height: 32px; }
+.growth__spark polyline {
+  fill: none; stroke: #3f51b5; stroke-width: 1.5;
+  stroke-linejoin: round; stroke-linecap: round;
+}
+.growth__trend-label { font-size: 12px; color: #777; }
 </style>

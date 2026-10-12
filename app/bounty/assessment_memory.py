@@ -188,6 +188,38 @@ class AssessmentMemory:
         except Exception:
             return 0
 
+    def growth_series(self, days: int = 14) -> list[dict]:
+        """成長趨勢（面板用）：回傳最近 `days` 天、每日「累積評估經驗筆數」。
+        純計數時間序列（方法論累積量），不含任何發現內容/攻擊資料。
+        誠實：沒有任何經驗就回空 list（面板顯示尚未累積）。
+        回傳 [{"date": "YYYY-MM-DD", "cumulative": n}, ...]（由舊到新）。"""
+        import datetime as _dt
+        col = self._ensure()
+        if col is None:
+            return []
+        try:
+            # 只取 metadata 的 ts；不需 documents/embeddings（避免拉內容）
+            got = col.get(include=["metadatas"])
+            metas = got.get("metadatas") or []
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("assess_growth_series_failed", error=str(exc))
+            return []
+        ts_list = sorted(
+            float(m.get("ts", 0)) for m in metas if m and m.get("ts"))
+        if not ts_list:
+            return []
+        today = _dt.date.today()
+        start = today - _dt.timedelta(days=max(1, days) - 1)
+        # 每天的累積量 = ts <= 當天 23:59:59 的經驗數
+        series: list[dict] = []
+        for i in range(max(1, days)):
+            d = start + _dt.timedelta(days=i)
+            end_of_day = _dt.datetime.combine(
+                d, _dt.time.max).timestamp()
+            cum = sum(1 for t in ts_list if t <= end_of_day)
+            series.append({"date": d.isoformat(), "cumulative": cum})
+        return series
+
     def recommend_priority_tools(self, target_type: str,
                                  query: str = "", k: int = 5) -> list[str]:
         """成長閉環-2（資料來源）：從過往相似評估經驗，推導「對這類目標較有
