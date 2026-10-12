@@ -132,11 +132,24 @@ class TelegramRuntime:
             return await update.message.reply_text(f"授權記錄失敗：{exc}")
         from app.bounty.models import ProgramScope
         from app.bounty.scanner import build_phased_profile
+        from app.bounty.enums import ScanTool
         host = target.split("://")[-1].split("/")[0]
         scope = ProgramScope(domains=[host])
+        # 成長閉環-2：回想過往評估經驗，推導「對這類目標較有產出的評估工具」，
+        # 讓這次的工具編排在階段內把高產出工具提前（越評估越懂先用哪些）。
+        prio_tools = []
+        mem = getattr(self._scanner, "_assessment_memory", None)
+        if mem is not None:
+            try:
+                names = mem.recommend_priority_tools("web_app",
+                        query=f"assessment of {host}")
+                name2tool = {t.value: t for t in ScanTool}
+                prio_tools = [name2tool[n] for n in names if n in name2tool]
+            except Exception:
+                prio_tools = []
         # 多工具階段化評估（評估模式；build_phased_profile 自動過濾非評估工具、
         # 填入評估白名單 args）。依方法論 recon→enumeration→vuln_scanning 編排。
-        profile = build_phased_profile()
+        profile = build_phased_profile(prioritize_tools=prio_tools)
         self._pending_scan.pop(str(update.effective_chat.id), None)
 
         tool_names = ", ".join(t.value for t in profile.tools)
@@ -368,8 +381,15 @@ def build_subsystems():
         # only. Local model = $0, no cloud quota, sensitive data stays on host.
         from app.bounty.authorized_scan import OllamaReportLLM
         report_llm = OllamaReportLLM(local_llm=llm)
+        # Growth loop: assessment memory records findings-pattern experience and
+        # lets future assessments recall it. Same persist dir as the dashboard's
+        # memory so the panel can show the accumulated experience count.
+        from app.bounty.assessment_memory import AssessmentMemory
+        mem_dir = os.environ.get("ELIANA_MEMORY__DIR", "data/eliana_memory")
+        assessment_memory = AssessmentMemory(persist_dir=mem_dir)
         scanner = AuthorizedScanner(db_path=bounty_db, scan_engine=engine,
-                                    report_llm=report_llm)
+                                    report_llm=report_llm,
+                                    assessment_memory=assessment_memory)
     except Exception as exc:
         logger.warning("scan subsystem not wired: %s", exc)
     rm = ResourceMonitor(ssh_channel=ssh)

@@ -67,6 +67,9 @@ BOUNTY_DB = os.environ.get("ELIANA_BOUNTY__DB", "YOUR_BOUNTY_DB")
 MEMORY_CHROMA_DIR = os.environ.get("ELIANA_DASH__MEMORY_DIR", "YOUR_MEMORY_DIR")
 MEMORY_COLLECTION = os.environ.get(
     "ELIANA_DASH__MEMORY_COLLECTION", "eliana_conversations")
+# 評估經驗 collection（成長閉環：越評估越懂）。與對話記憶同 persist_dir。
+ASSESSMENT_COLLECTION = os.environ.get(
+    "ELIANA_DASH__ASSESSMENT_COLLECTION", "eliana_assessment_memory")
 PERSONALITY_DB = os.environ.get(
     "ELIANA_DASH__PERSONALITY_DB", "YOUR_PERSONALITY_DB")
 
@@ -214,6 +217,19 @@ def _count_memory_sync() -> int:
         return 0
 
 
+def _count_assessment_sync() -> int:
+    """評估經驗筆數（成長閉環累積的評估次數）。沒做過真實評估就誠實回 0。"""
+    try:
+        import chromadb
+        client = chromadb.PersistentClient(path=MEMORY_CHROMA_DIR)
+        # collection 不存在時 get_or_create 會建空的 -> count 0（誠實）
+        return int(client.get_or_create_collection(
+            ASSESSMENT_COLLECTION).count())
+    except Exception as exc:
+        logger.warning("assessment count failed: %s", exc)
+        return 0
+
+
 def _personality_growth_sync() -> dict:
     """讀 personality.db：目前版本、是否演化過、關鍵參數（人話）。
 
@@ -269,6 +285,7 @@ async def real_knowledge_provider() -> KnowledgeStats:
     """
     total, per_collection = await asyncio.to_thread(_count_knowledge_sync)
     memory_segments = await asyncio.to_thread(_count_memory_sync)
+    assessment_experiences = await asyncio.to_thread(_count_assessment_sync)
     growth = await asyncio.to_thread(_personality_growth_sync)
 
     # collection 技術名 -> 人話標籤
@@ -278,6 +295,7 @@ async def real_knowledge_provider() -> KnowledgeStats:
 
     strategy_summary = {
         "長期記憶段數": memory_segments,
+        "評估經驗次數": assessment_experiences,
         "人格版本": growth["版本"],
         "已演化次數": growth["已演化次數"],
         "主動性": growth["主動性"],

@@ -117,6 +117,7 @@ _METHODOLOGY_PHASES: list[tuple[str, list[ScanTool]]] = [
 def build_phased_profile(
     tools: Optional[list[ScanTool]] = None,
     timeout_seconds: float = _DEFAULT_TOOL_TIMEOUT,
+    prioritize_tools: Optional[list[ScanTool]] = None,
 ) -> ScanProfile:
     """依方法論階段排序工具並自動填入評估模式 args，產生一個 ScanProfile。
 
@@ -125,16 +126,26 @@ def build_phased_profile(
       利用工具一律剔除——agent 不自動編排利用）。
     * 工具依 recon → enumeration → vuln_scanning 的方法論順序排列，使
       execute_scan 的既有順序迴圈自然按階段執行。
+    * prioritize_tools（成長閉環-2）：由過往評估經驗推導的「對這類目標較有
+      產出的工具」。這些工具在「其所屬方法論階段內」被排到前面——不跨階段、
+      不打破 recon→enum→vuln 的方法論正確性，只在階段內微調順序，體現
+      「越評估越懂先用哪些評估工具」。
     * 每個工具的 args 來自 _EVAL_MODE_ARGS 白名單（評估模式，可稽核）。
     """
     requested = set(tools) if tools is not None else set(_AUTO_ORCHESTRATION_TOOLS)
     # 合規過濾：剔除任何非自動編排（利用類）工具
     allowed = requested & _AUTO_ORCHESTRATION_TOOLS
+    prio = [t for t in (prioritize_tools or []) if t in allowed]
 
     ordered: list[ScanTool] = []
     for _phase_name, phase_tools in _METHODOLOGY_PHASES:
-        for t in phase_tools:
-            if t in allowed and t not in ordered:
+        # 階段內：先放「過往高產出」的優先工具（保持它們在 phase_tools 的相對
+        # 出現順序），再放其餘；絕不把工具移出其所屬階段。
+        in_phase = [t for t in phase_tools if t in allowed]
+        prioritized = [t for t in phase_tools if t in prio]
+        rest = [t for t in in_phase if t not in prioritized]
+        for t in prioritized + rest:
+            if t not in ordered:
                 ordered.append(t)
 
     args = {t: list(_EVAL_MODE_ARGS.get(t, [])) for t in ordered}

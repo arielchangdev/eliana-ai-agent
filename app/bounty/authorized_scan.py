@@ -53,12 +53,15 @@ class OllamaReportLLM:
 
 class AuthorizedScanner:
     def __init__(self, db_path: str = "data/bounty.db", scan_engine=None,
-                 report_llm=None):
+                 report_llm=None, assessment_memory=None):
         self._db_path = db_path
         self._engine = scan_engine
         # Optional LLM client for report narrative. None -> template-only.
         # CVSS score is ALWAYS computed by the cvss formula, never the LLM.
         self._report_llm = report_llm
+        # Optional growth-loop memory: records assessment experience (findings
+        # patterns / tool efficacy) so future assessments can recall. None -> off.
+        self._assessment_memory = assessment_memory
 
     # ---- authorization record management ---- #
     def grant_authorization(self, target_url: str, program_id: str = "manual",
@@ -151,6 +154,7 @@ class AuthorizedScanner:
         if getattr(self._engine, "_db", None) is not None:
             result = await self._engine.execute_scan(target, profile)
             await self._generate_reports(result, self._engine._db)
+            self._record_experience(target_url, result)
             return result
 
         import aiosqlite
@@ -161,9 +165,30 @@ class AuthorizedScanner:
                 # Report generation on the SAME connection the scan/vuln rows
                 # were written to (reports.vulnerability_id FK -> vulnerabilities).
                 await self._generate_reports(result, conn)
+                self._record_experience(target_url, result)
                 return result
             finally:
                 self._engine._db = None
+
+    def _record_experience(self, target_url: str, result) -> None:
+        """成長閉環（存）：把這次授權評估的發現模式存為可回想的經驗。
+        學方法論/效能（工具、發現類型、ATT&CK 分類），不學攻擊技巧。"""
+        if self._assessment_memory is None:
+            return
+        try:
+            vulns = getattr(result, "vulnerabilities", []) or []
+            tools_used = [t.value for t in getattr(result, "tools_used", [])]
+            findings = [{
+                "severity": v.severity.value if hasattr(v.severity, "value") else str(v.severity),
+                "attack_technique_id": getattr(v, "attack_technique_id", None),
+                "attack_technique_name": getattr(v, "attack_technique_name", None),
+            } for v in vulns]
+            target_type = "web_app"
+            self._assessment_memory.record_assessment(
+                target=target_url, target_type=target_type,
+                tools_used=tools_used, findings=findings)
+        except Exception as exc:
+            logger.warning("record_experience_failed", error=str(exc))
 
     async def _ensure_manual_program(self, conn) -> None:
         """Ensure a 'manual' bounty_programs row exists so report generation
@@ -209,10 +234,23 @@ class AuthorizedScanner:
             logger.warning("report_skipped_no_program")
             return
 
+        # 成長閉環-1：回想與這次發現相似的「過往評估經驗」，附進報告做脈絡
+        # 參考。recall 發生在存這次經驗之前（_record_experience 在 scan 收尾
+        # 更後面），所以引用的是真正的過往經驗，不會引用到自己。
         report_gen = ReportGenerator(llm_client=self._report_llm)
         for vuln in reportable:
             try:
                 report = await report_gen.generate_report(vuln, program)
+                if self._assessment_memory is not None:
+                    try:
+                        q = f"{vuln.title} {vuln.description}"
+                        past = self._assessment_memory.recall_similar(q, k=2)
+                        if past:
+                            ref = "\n\n--- 參考過往評估經驗（回想） ---\n" + \
+                                  "\n".join(f"• {p.splitlines()[0]}" for p in past)
+                            report.description = (report.description or "") + ref
+                    except Exception:
+                        pass
                 await self._persist_report(conn, report)
                 logger.info("report_generated", vuln=vuln.id,
                             severity=vuln.severity.value,

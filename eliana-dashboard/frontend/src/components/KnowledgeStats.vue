@@ -21,6 +21,7 @@ const maxCount = computed(() =>
 const s = computed(() => props.stats?.strategySummary ?? {})
 
 const memorySegments = computed(() => Number(s.value['長期記憶段數'] ?? 0))
+const assessmentCount = computed(() => Number(s.value['評估經驗次數'] ?? 0))
 const personaVersion = computed(() => Number(s.value['人格版本'] ?? 0))
 const evolveCount = computed(() => Number(s.value['已演化次數'] ?? 0))
 
@@ -73,6 +74,17 @@ const evolveLabel = computed(() =>
         <h4 class="growth__title">長期記憶</h4>
         <p class="growth__line" data-testid="memory-segments">
           {{ memorySegments }} 段對話
+        </p>
+      </section>
+
+      <!-- 評估經驗（成長閉環：越評估越懂）-->
+      <section class="growth__block">
+        <h4 class="growth__title">評估經驗</h4>
+        <p class="growth__line" data-testid="assessment-count">
+          <template v-if="assessmentCount > 0">
+            從 {{ assessmentCount }} 次評估累積經驗（下次評估會回想參考）
+          </template>
+          <template v-else>尚未累積評估經驗</template>
         </p>
       </section>
 
