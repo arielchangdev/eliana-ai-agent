@@ -157,6 +157,19 @@ on the dashboard — honestly (empty when nothing has accumulated).
 
 ---
 
+## Follow-up — separate teaching from chatting (`e6fa963`)
+
+Fixed a confusing behavior where sending a piece of knowledge over Telegram made
+Eliana continue the previous chat topic (plain text always ran the chat path with
+injected history). Added two commands: `/learn <text>` stores taught knowledge
+into the `ariel_knowledge` collection (dashboard "你教的" count) without running
+chat generation, carrying history, or triggering evolution; `/reset` clears a
+chat's short-term context to start a fresh topic while keeping long-term vector
+memory. New `app/integration/knowledge_store.py` (local Ollama embeddings +
+Chroma, same pattern as conversation memory).
+
+---
+
 ## Runtime / deployment notes
 
 - Services run under systemd as user `eliana` on the agent VM:
@@ -164,7 +177,7 @@ on the dashboard — honestly (empty when nothing has accumulated).
   `eliana-telegram`, `eliana-electrum` (testnet-locked).
 - Config via env files; de-identified placeholders in the repo must be set to
   real values on the host (`ELIANA_BOUNTY__DB`, `ELIANA_WEAPON__*`,
-  `ELIANA_MEMORY__DIR`, dashboard `ELIANA_DASH__*`).
+  `ELIANA_MEMORY__DIR`, `ELIANA_KNOWLEDGE__DIR`, dashboard `ELIANA_DASH__*`).
 - Assessment memory persists under the memory dir in the
   `eliana_assessment_memory` Chroma collection, separate from
   `eliana_conversations`.
