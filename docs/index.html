@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Project "Angelina" — Zero-Cost Hybrid-Cloud AI System</title>
+<title>Eliana — A Self-Improving Red-Team Assessment Agent</title>
 <style>
   :root {
     --bg: #0f1419;
@@ -33,8 +33,6 @@
   h3 { font-size: 1.05rem; margin: 0 0 .4rem; }
   p { margin: .5rem 0; }
   .muted { color: var(--muted); }
-
-  /* Hero */
   .hero {
     padding: 72px 0 56px;
     background:
@@ -57,14 +55,11 @@
   }
   .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-2); }
   .pill.alt .dot { background: var(--accent); }
-
   section { padding: 48px 0; border-bottom: 1px solid var(--line); }
   .eyebrow { color: var(--accent-2); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: .78rem; margin-bottom: 6px; }
-
   .grid { display: grid; gap: 16px; }
   .cols-2 { grid-template-columns: repeat(2, 1fr); }
   .cols-3 { grid-template-columns: repeat(3, 1fr); }
-
   .card {
     background: var(--panel); border: 1px solid var(--line);
     border-radius: var(--radius); padding: 20px;
@@ -74,12 +69,9 @@
   .card h3 { color: var(--text); }
   .card p { color: var(--muted); font-size: .95rem; margin: 0; }
   .tag { font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; color: var(--accent); font-weight: 700; }
-
-  /* Architecture cards flow */
   .arch-flow { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 8px; }
   .arch-flow .card { text-align: left; }
   .arch-flow .num { font-size: .75rem; color: var(--accent-2); font-weight: 700; }
-
   pre {
     background: #0b0f14; border: 1px solid var(--line); border-radius: var(--radius);
     padding: 18px; overflow-x: auto; font-size: .8rem; line-height: 1.5;
@@ -88,25 +80,24 @@
   }
   details { margin-top: 16px; }
   summary { cursor: pointer; color: var(--muted); font-weight: 600; }
-
-  /* War stories */
   .stories { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
   .story { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
   .story h3 { font-size: .98rem; margin: 0 0 2px; }
   .story p { margin: 0; color: var(--muted); font-size: .9rem; }
-
-  /* Metrics */
+  .callout {
+    background: linear-gradient(180deg, rgba(94,230,168,.08), rgba(78,161,255,.05));
+    border: 1px solid #30465a; border-radius: var(--radius); padding: 24px;
+  }
+  .callout .big { font-size: clamp(1.3rem, 3vw, 1.8rem); font-weight: 800; color: var(--accent-2); line-height: 1.2; }
   .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
   .metric { background: linear-gradient(180deg, var(--panel-2), var(--panel)); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px 18px; text-align: center; }
   .metric .big { font-size: clamp(1.4rem, 3vw, 2rem); font-weight: 800; color: var(--accent-2); line-height: 1.1; }
   .metric .lbl { color: var(--muted); font-size: .85rem; margin-top: 6px; }
-
   footer { padding: 44px 0 56px; }
   .footlinks { display: flex; flex-wrap: wrap; gap: 10px 22px; margin: 10px 0 18px; }
   .footlinks a { font-weight: 600; }
   .built { color: var(--muted); font-size: .9rem; }
   .note { color: var(--muted); font-size: .82rem; max-width: 760px; margin-top: 10px; }
-
   @media (max-width: 860px) {
     .cols-2, .cols-3, .arch-flow, .stories, .metrics { grid-template-columns: 1fr; }
     .arch-flow { grid-template-columns: repeat(2, 1fr); }
@@ -119,174 +110,154 @@
 </style>
 </head>
 <body>
-
 <header class="hero">
   <div class="wrap">
-    <h1>Project &ldquo;Angelina&rdquo;</h1>
-    <p class="tagline">A zero-cost, self-hosted, hybrid-cloud AI system &mdash; engineered for reliability under hard constraints.</p>
+    <h1>Eliana</h1>
+    <p class="tagline">A self-improving red-team assessment agent &mdash; autonomous architecture, bounded self-improvement, and human-in-the-loop authorization. <strong>Autonomy with a leash.</strong></p>
     <div class="pills">
-      <span class="pill"><span class="dot"></span>$0 sustained cost</span>
-      <span class="pill alt"><span class="dot"></span>No production regressions</span>
+      <span class="pill"><span class="dot"></span>Authorized-only by design</span>
+      <span class="pill alt"><span class="dot"></span>$0 sustained cost</span>
+      <span class="pill"><span class="dot"></span>Verifiable learning loop</span>
     </div>
   </div>
 </header>
-
 <section>
   <div class="wrap">
     <div class="eyebrow">What it is</div>
-    <h2>A resilient two-node AI agent that costs nothing to run</h2>
+    <h2>A red-team assessment agent that grows &mdash; within limits it cannot cross</h2>
     <p class="muted">
-      A self-hosted AI agent (Python + FastAPI, a hosted LLM on its free tier, a vector database for retrieval,
-      and SQLite for state) that performs a scheduled daily task, keeps a retrievable knowledge base in sync, and
-      serves a phone-friendly chat interface over HTTPS. The interesting part isn't the model call &mdash; it's the
-      operations engineering around it: a hybrid <strong>local-primary / cloud-passive</strong> deployment with
-      heartbeat-based failover, authenticated bi-directional sync, and fully idempotent infrastructure-as-code,
-      all delivered inside always-free tiers without ever breaking the running service.
+      Eliana is a conversational, self-hosted agent (Python + a hosted LLM on its free tier) that performs
+      <strong>authorized</strong> security assessment: it orchestrates multiple reconnaissance and analysis tools,
+      classifies findings against MITRE ATT&amp;CK, and reports results through a Telegram runtime and a live dashboard.
+      The interesting part isn't that it talks &mdash; it's the discipline around autonomy. Eliana improves its own
+      assessment behavior through a <strong>verifiable learning loop</strong>, while every capability stays behind a
+      dual authorization gate, an evaluation-mode allowlist, and a human in the loop. It assesses and classifies;
+      it does not weaponize.
     </p>
   </div>
 </section>
-
 <section>
   <div class="wrap">
-    <div class="eyebrow">Architecture</div>
-    <h2>Local does the work. Cloud stays quiet &mdash; until it can't.</h2>
-    <div class="arch-flow">
+    <div class="eyebrow">Three pillars</div>
+    <h2>Autonomous, self-improving, and kept on a leash</h2>
+    <div class="grid cols-3">
       <div class="card">
-        <div class="num">01 &middot; PRIMARY</div>
-        <h3>Local VM</h3>
-        <p>Home-lab VM runs the app under systemd and fires the daily task on a cron schedule. All real work happens here.</p>
+        <span class="tag">Pillar 1</span>
+        <h3>Autonomous architecture</h3>
+        <p>Multi-tool orchestration across a phased assessment profile, with conversational operation over a Telegram runtime and a live status dashboard.</p>
       </div>
       <div class="card">
-        <div class="num">02 &middot; PASSIVE</div>
-        <h3>Cloud backup</h3>
-        <p>An always-free cloud VM sits idle, bound to localhost behind HTTPS, ready to take over only when needed.</p>
+        <span class="tag">Pillar 2</span>
+        <h3>Bounded self-improvement</h3>
+        <p>An assessment memory feeds a verifiable learning loop that measurably changes the agent's behavior &mdash; proven, not simulated.</p>
       </div>
       <div class="card">
-        <div class="num">03 &middot; COORDINATION</div>
-        <h3>Heartbeat failover</h3>
-        <p>Local stamps a presence heartbeat; cloud checks it and fails over only if local goes silent past a 25-hour window.</p>
-      </div>
-      <div class="card">
-        <div class="num">04 &middot; DATA</div>
-        <h3>HTTPS sync</h3>
-        <p>A token-gated endpoint exchanges knowledge vectors and history daily, merged last-write-wins, re-embedded on import.</p>
+        <span class="tag">Pillar 3</span>
+        <h3>Human-in-the-loop authorization</h3>
+        <p>A dual authorization gate, an evaluation-mode argument allowlist, and ATT&CK classification (not attack execution) keep scope enforced in code.</p>
       </div>
     </div>
-
-    <details>
-      <summary>Show the full topology (ASCII)</summary>
-<pre>
-                      shared sheet (heartbeat relay + logging)
-                      ▲         ▲
-      stamp heartbeat │         │ read heartbeat at 23:00 check
-                      │         │
-   ┌──────────────────┴──┐   ┌──┴───────────────────┐
-   │  LOCAL  (PRIMARY)    │   │  CLOUD (PASSIVE)      │
-   │  home-lab VM         │   │  always-free e2-micro │
-   │  • FastAPI (LAN)     │   │  • app bound to       │
-   │  • cron daily task   │   │    127.0.0.1          │
-   │  • heartbeat (local  │   │  • Caddy -> HTTPS      │
-   │    role only)        │   │  • dynamic DNS        │
-   └──────────┬───────────┘   │  • 22/80/443 only,    │
-              │               │    SSH key-only       │
-              │  token-gated  └──────────┬────────────┘
-              │  HTTPS sync (last-write-  │
-              └──  wins, re-embed) ───────┘
-
-   remote user ──HTTPS──▶ Caddy ──▶ cloud app ──▶ chat UI + /audit
-</pre>
-    </details>
   </div>
 </section>
-
+<section>
+  <div class="wrap">
+    <div class="eyebrow">The proof</div>
+    <h2>Learning you can verify, not just claim</h2>
+    <div class="callout">
+      <div class="big">CLOSED-LOOP-PROVEN</div>
+      <p class="muted" style="margin-top:10px;">
+        The hardest thing to trust in a &ldquo;self-learning&rdquo; agent is whether it's actually learning or just
+        looking like it. Eliana's loop is verifiable end to end: seed a past assessment experience, run again, and
+        observe the behavior change. In the proven case, a tool that previously sat <strong>5th</strong> in the
+        execution order moved up to <strong>3rd</strong> after the agent recalled relevant prior experience &mdash;
+        a concrete, reproducible shift in behavior driven by what it learned.
+      </p>
+    </div>
+  </div>
+</section>
 <section>
   <div class="wrap">
     <div class="eyebrow">Engineering highlights</div>
-    <h2>What makes it reliable</h2>
+    <h2>What makes it trustworthy</h2>
     <div class="grid cols-3">
       <div class="card">
-        <span class="tag">Failover</span>
-        <h3>At-most-once failover</h3>
-        <p>Heartbeat + 25-hour presence window guarantees exactly one daily run across two nodes &mdash; never a duplicate.</p>
+        <span class="tag">Orchestration</span>
+        <h3>Phased multi-tool profiles</h3>
+        <p>Builds a staged assessment across multiple tools, with finding de-duplication so repeated signals collapse into one.</p>
       </div>
       <div class="card">
-        <span class="tag">Sync</span>
-        <h3>Bi-directional HTTPS sync</h3>
-        <p>Token-gated daily exchange of knowledge vectors and history, last-write-wins, re-embedded on import.</p>
+        <span class="tag">Classification</span>
+        <h3>ATT&amp;CK mapping, not attacks</h3>
+        <p>A curated rule table maps findings to MITRE ATT&CK techniques for reporting &mdash; classification as a defensive artifact, never exploitation.</p>
       </div>
       <div class="card">
-        <span class="tag">IaC</span>
-        <h3>Idempotent Ansible</h3>
-        <p>A single playbook provisions the whole host &mdash; timezone, swap, firewall, runtime, app, TLS &mdash; re-runnable any time.</p>
+        <span class="tag">Learning</span>
+        <h3>Verifiable assessment memory</h3>
+        <p>Stores past experience and recalls it to inform future runs, gated so attack-oriented terms never drive behavior.</p>
       </div>
       <div class="card">
-        <span class="tag">Ops</span>
-        <h3>Audit &amp; self-healing</h3>
-        <p>Read-only security audit scoring, gated service self-healing with a preview mode, and proactive TLS-expiry checks.</p>
+        <span class="tag">Guardrail</span>
+        <h3>Dual authorization gate</h3>
+        <p>Every assessment passes two independent authorization checks before any tool runs &mdash; scope enforced in code, not policy docs.</p>
       </div>
       <div class="card">
-        <span class="tag">Access</span>
-        <h3>Secure HTTPS remote access</h3>
-        <p>Auto certificates via reverse proxy, constant-time token auth, SSH key-only, root disabled, minimal open ports.</p>
+        <span class="tag">Guardrail</span>
+        <h3>Evaluation-mode allowlist</h3>
+        <p>Tool arguments are restricted to a vetted evaluation set; intrusive orchestration is excluded by design.</p>
       </div>
       <div class="card">
         <span class="tag">Cost</span>
-        <h3>Zero cost by design</h3>
-        <p>Every component lives inside an always-free tier, with a $1 budget tripwire that has never fired.</p>
+        <h3>Zero cost, testnet-only</h3>
+        <p>Runs entirely on free tiers; the wallet integration is testnet-only, carrying no real-money risk.</p>
       </div>
     </div>
   </div>
 </section>
-
 <section>
   <div class="wrap">
     <div class="eyebrow">War stories</div>
-    <h2>Nine production bugs, nine lessons</h2>
-    <p class="muted">Reliability was earned the hard way. Each bug taught a generalizable lesson &mdash; full write-up in the post-mortem.</p>
+    <h2>The hard part wasn't the AI. It was the wiring.</h2>
+    <p class="muted">Six bugs ate most of the build time &mdash; none were about intelligence, all were about plumbing. Full engineering write-up in the blog.</p>
     <div class="stories">
-      <div class="story"><h3>1. Credential clobbering on deploy</h3><p>Config is not code &mdash; keep secrets out of source.</p></div>
-      <div class="story"><h3>2. Cron ran without the environment</h3><p>cron inherits nothing; load your environment explicitly.</p></div>
-      <div class="story"><h3>3. Python 3.11 vs 3.12 syntax drift</h3><p>&ldquo;Works on my machine&rdquo; has a version number attached.</p></div>
-      <div class="story"><h3>4. SQLite upsert vs partial index</h3><p>Upsert arbiters have precise, engine-specific rules.</p></div>
-      <div class="story"><h3>5. Namespace-bounce duplication</h3><p>In sync, identity must be stable and origin-aware.</p></div>
-      <div class="story"><h3>6. Synchronous re-embed timeout</h3><p>Keep slow, unbounded work off the request path.</p></div>
-      <div class="story"><h3>7. Failover double-stamp</h3><p>A presence signal must be written only by its owner.</p></div>
-      <div class="story"><h3>8. Transient 503 missed a push</h3><p>Retry with capped backoff for rare, high-stakes jobs.</p></div>
-      <div class="story"><h3>9. UTC vs local timezone cron</h3><p>Set the timezone explicitly; schedulers trust the clock blindly.</p></div>
+      <div class="story"><h3>1. Scan engine never touched the database</h3><p>A component can look wired up and still be talking to nothing.</p></div>
+      <div class="story"><h3>2. SSH session built but never connected</h3><p>Constructing a client isn't the same as opening the connection.</p></div>
+      <div class="story"><h3>3. Money math on floats</h3><p>Use Decimal for value &mdash; float precision drifts silently.</p></div>
+      <div class="story"><h3>4. The &ldquo;learning&rdquo; was fake</h3><p>A feature that quietly pretends to work is the worst kind of bug.</p></div>
+      <div class="story"><h3>5. systemd %h pointed at the wrong home</h3><p>Service specifiers resolve against the unit's user, not yours.</p></div>
+      <div class="story"><h3>6. De-identification fallback missed a path</h3><p>Scrubbing has to cover every path, not the happy one.</p></div>
     </div>
-    <p style="margin-top:18px;"><a href="../BLOG_WIRING.md" title="link to engineering write-up">Read the full engineering write-up &rarr;</a></p>
+    <p style="margin-top:18px;"><a href="https://dev.to/arielchangdev/the-hard-part-wasnt-the-ai-6-wiring-bugs-from-building-a-self-improving-agent-3bd5" title="link to engineering blog">Read the full engineering write-up &rarr;</a></p>
   </div>
 </section>
-
 <section>
   <div class="wrap">
     <div class="eyebrow">Results</div>
     <h2>Measured outcomes</h2>
     <div class="metrics">
-      <div class="metric"><div class="big">$0</div><div class="lbl">sustained cost; tripwire never fired</div></div>
-      <div class="metric"><div class="big">Multi-day</div><div class="lbl">failover verified in production</div></div>
-      <div class="metric"><div class="big">At-most-once</div><div class="lbl">no duplicate daily output</div></div>
-      <div class="metric"><div class="big">v1 &rarr; v3.4.1</div><div class="lbl">disciplined, secret-scanned releases</div></div>
+      <div class="metric"><div class="big">$0</div><div class="lbl">sustained cost on free tiers</div></div>
+      <div class="metric"><div class="big">CLOSED-LOOP-PROVEN</div><div class="lbl">behavior change verified end to end</div></div>
+      <div class="metric"><div class="big">Authorized-only</div><div class="lbl">dual-gate scope enforced in code</div></div>
+      <div class="metric"><div class="big">Testnet</div><div class="lbl">wallet integration, no real-money risk</div></div>
     </div>
   </div>
 </section>
-
 <footer>
   <div class="wrap">
     <div class="eyebrow">Links</div>
     <div class="footlinks">
       <a href=".." title="link to GitHub repository">GitHub repo</a>
       <a href="../CASE_STUDY.md" title="link to case study">Case Study</a>
+      <a href="https://dev.to/arielchangdev/the-hard-part-wasnt-the-ai-6-wiring-bugs-from-building-a-self-improving-agent-3bd5" title="link to engineering blog">Engineering Blog</a>
       <a href="../CHANGELOG.md" title="link to changelog">Changelog</a>
       <a href="https://www.linkedin.com/in/ariel-chang-690a89160" title="link to LinkedIn">LinkedIn</a>
     </div>
     <p class="built">Built by Ariel Chang</p>
     <p class="note">
-      This is a de-identified portfolio presentation of a single-operator engineering project. The system produces
-      analysis for personal, informational use only and is not financial or investment advice.
+      This is a de-identified portfolio presentation of a single-operator engineering project. Eliana performs
+      authorized security assessment for research and educational purposes only. It classifies and reports findings;
+      it does not perform exploitation, post-exploitation, or any offensive action.
     </p>
   </div>
 </footer>
-
 </body>
 </html>
