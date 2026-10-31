@@ -51,6 +51,7 @@ class TelegramRuntime:
         self._scanner = scanner
         self._knowledge = knowledge_store
         self._pending_scan = {}   # chat_id -> target awaiting /authorize
+        self._running_assessments = {}  # chat_id -> asyncio.Task of in-flight scan
         self._app = None
 
     def _authorized(self, user_id: int) -> bool:
@@ -73,6 +74,8 @@ class TelegramRuntime:
             "/status - live system state\n"
             "/local /cloud /auto - 切換 LLM 路由模式\n"
             "/persona /undo /evolve - 人格演化查看與控制\n"
+            "/scan /authorize /cancel - 授權評估流程\n"
+            "/stop - 中止進行中的評估掃描\n"
             "/learn <內容> - 教 Eliana 一條知識（收進知識庫，不聊天）\n"
             "/reset - 開新話題（清短期脈絡；長期記憶保留）\n"
             "/chat <message> - talk to Eliana (local LLM + persona)\n"
@@ -163,12 +166,16 @@ class TelegramRuntime:
             f"方法論階段：偵察 → 列舉 → 漏洞掃描\n"
             f"這會花幾分鐘，完成後我會回報結果，請稍候…")
 
-        # 背景執行，避免阻塞 handler；完成後主動把結果發回此對話
+        # 背景執行，避免阻塞 handler；完成後主動把結果發回此對話。
+        # 記住 task handle，讓 /stop 能中止這次掃描（per chat）。
         chat_id = update.effective_chat.id
-        asyncio.create_task(self._run_assessment(chat_id, target, scope, profile))
+        task = asyncio.create_task(
+            self._run_assessment(chat_id, target, scope, profile))
+        self._running_assessments[str(chat_id)] = task
 
     async def _run_assessment(self, chat_id, target, scope, profile) -> None:
         """背景執行授權評估並把結果回報到對話（誠實呈現）。"""
+        msg = None
         try:
             result = await self._scanner.scan(target, scope, profile)
             vulns = (result.get("vulnerabilities", [])
@@ -191,18 +198,46 @@ class TelegramRuntime:
             if not vulns:
                 lines.append("（本次評估未發現項目——這是真實結果）")
             msg = "\n".join(lines)
+        except asyncio.CancelledError:
+            # /stop 觸發：停止等待掃描、關閉底層 SSH 連線。誠實告知使用者
+            # 這是「停止等待並中斷連線」，不保證強制殺掉遠端已啟動的工具進程。
+            try:
+                await self._app.bot.send_message(
+                    chat_id=int(chat_id),
+                    text=(f"🛑 已中止評估：{target}\n"
+                          "（已停止等待並關閉掃描連線；若有工具正在遠端執行，"
+                          "通常會隨連線關閉而結束。）"))
+            except Exception:
+                logger.warning("assessment cancel notice send failed")
+            raise  # 讓 task 正常進入 cancelled 狀態
         except Exception as exc:
             msg = f"評估結束（{type(exc).__name__}）：{exc}"
-        try:
-            await self._app.bot.send_message(chat_id=int(chat_id), text=msg)
-        except Exception:
-            logger.warning("assessment result send failed")
+        finally:
+            # 無論完成/失敗/取消，都清掉這個 chat 的 task handle
+            self._running_assessments.pop(str(chat_id), None)
+        if msg is not None:
+            try:
+                await self._app.bot.send_message(chat_id=int(chat_id), text=msg)
+            except Exception:
+                logger.warning("assessment result send failed")
 
     async def cmd_cancel(self, update, context) -> None:
         if not self._authorized(update.effective_user.id):
             return await self._reply_unauthorized(update)
         self._pending_scan.pop(str(update.effective_chat.id), None)
         await update.message.reply_text("已取消。")
+
+    async def cmd_stop(self, update, context) -> None:
+        """中止「進行中」的評估掃描（最保險做法：只取消 asyncio task，
+        由既有機制連帶關閉 SSH 連線；不對遠端送 kill，避免影響系統穩定性）。"""
+        if not self._authorized(update.effective_user.id):
+            return await self._reply_unauthorized(update)
+        key = str(update.effective_chat.id)
+        task = self._running_assessments.get(key)
+        if task is None or task.done():
+            return await update.message.reply_text("目前沒有進行中的掃描可中止。")
+        task.cancel()  # _run_assessment 的 CancelledError 分支會推播中止訊息
+        await update.message.reply_text("已送出中止，正在停止掃描…")
 
     async def cmd_persona(self, update, context) -> None:
         if not self._authorized(update.effective_user.id):
@@ -376,6 +411,7 @@ class TelegramRuntime:
         app.add_handler(CommandHandler("scan", self.cmd_scan))
         app.add_handler(CommandHandler("authorize", self.cmd_authorize))
         app.add_handler(CommandHandler("cancel", self.cmd_cancel))
+        app.add_handler(CommandHandler("stop", self.cmd_stop))
         app.add_handler(CommandHandler("learn", self.cmd_learn))
         app.add_handler(CommandHandler("reset", self.cmd_reset))
         app.add_handler(CommandHandler("chat", self.cmd_chat))
