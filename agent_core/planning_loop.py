@@ -133,6 +133,15 @@ class PlanningLoop:
                     index=step_index, decision=decision,
                     gate=_noop_allow_placeholder(decision.tool_call),
                     observation=None))
+                # A planner STOP after real assessment work is a NORMAL
+                # COMPLETION -> record experience, same as the other two exit
+                # paths. Condition (honest, avoids polluting memory): record ONLY
+                # if at least one tool actually ran AND findings accumulated this
+                # run. A first-step STOP with no executed tool records nothing.
+                # This return is mutually exclusive with the no-progress / budget
+                # returns below (the function exits here), so no double-record.
+                if _tools_used(trace) and findings:
+                    self._record_experience(goal, findings, trace)
                 return AssessmentOutcome(
                     findings=findings, trace=trace,
                     stopped_reason=decision.rationale or "planner stop")
