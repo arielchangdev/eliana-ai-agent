@@ -552,6 +552,36 @@ async def real_task_provider() -> list:
 
 
 # --------------------------------------------------------------------------- #
+# agent decision trace（唯讀視圖；task 10.2）
+# --------------------------------------------------------------------------- #
+def _render_decision_trace() -> dict:
+    """唯讀渲染「最新一次 agent 規劃迴圈」的決策軌跡，供面板展示 agent 的
+    每一步決定（選的工具 + allow/deny）。
+
+    實際渲染邏輯在 agent_core.trace_registry.render_latest()（agent-agnostic、
+    無 dashboard 相依，便於單元測試）。這裡只是 dashboard 端的薄包裝。
+
+    重要（誠實 + 唯讀）：
+      * 來源是 in-process trace_registry。PlanningLoop 跑在 telegram-runtime
+        進程；dashboard 是獨立進程。**不同進程時讀不到 trace，誠實回
+        available=False**，不假裝有資料（跨進程持久化是 future work）。
+      * 純讀取、不回寫、不觸發任何規劃——面板絕不能影響 planning。
+    """
+    try:
+        from agent_core.trace_registry import render_latest
+    except Exception as exc:  # noqa: BLE001 - agent_core 不可用時誠實回空
+        logger.warning("agent trace view: agent_core unavailable: %s", exc)
+        return {"available": False, "reason": "agent_core unavailable", "steps": []}
+    return render_latest()
+
+
+async def real_decision_trace_provider() -> dict:
+    """唯讀 provider：回傳最新 agent 決策軌跡視圖（無則誠實回 available=False）。
+    不影響 planning；僅供 dashboard 展示。"""
+    return await asyncio.to_thread(_render_decision_trace)
+
+
+# --------------------------------------------------------------------------- #
 # 組裝
 # --------------------------------------------------------------------------- #
 async def build_real_components(db_path: str = "data/dashboard.db"):

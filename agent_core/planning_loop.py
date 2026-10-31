@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from . import trace_registry
 from .models import (
     AssessmentGoal,
     AssessmentOutcome,
@@ -80,6 +81,17 @@ class PlanningLoop:
 
     # -- the loop -------------------------------------------------------- #
     async def run(self, goal: AssessmentGoal) -> AssessmentOutcome:
+        """Execute the loop and publish the resulting trace to the in-process
+        trace_registry for the read-only dashboard view. Publishing is
+        best-effort and read-only — it never feeds back into planning."""
+        outcome = await self._run_impl(goal)
+        try:
+            trace_registry.publish(outcome.trace)
+        except Exception:  # noqa: BLE001 - publishing must never affect the run
+            pass
+        return outcome
+
+    async def _run_impl(self, goal: AssessmentGoal) -> AssessmentOutcome:
         """Execute perceive→decide→gate→act→observe→reflect until the goal is
         met, no progress is made, the planner is unavailable, or the step budget
         (min(goal.max_steps, self._max_steps)) is exhausted."""

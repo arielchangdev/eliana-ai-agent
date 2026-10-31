@@ -44,12 +44,16 @@ class TelegramRuntime:
         resource_monitor: Any | None = None,
         scanner: Any | None = None,
         knowledge_store: Any | None = None,
+        agent: Any | None = None,
     ) -> None:
         self._cfg = _load_cfg()
         self._personality = personality
         self._rm = resource_monitor
         self._scanner = scanner
         self._knowledge = knowledge_store
+        # agent config: {"loop": PlanningLoop} (or None). Only used when the
+        # ELIANA_AGENT__LOOP_ENABLED flag is on; default-off keeps legacy path.
+        self._agent = agent
         self._pending_scan = {}   # chat_id -> target awaiting /authorize
         self._running_assessments = {}  # chat_id -> asyncio.Task of in-flight scan
         self._app = None
@@ -132,18 +136,47 @@ class TelegramRuntime:
         if not target or target != pending:
             return await update.message.reply_text(
                 "請先用 /scan <目標> 發起，再用 /authorize <同一個目標> 確認。")
-        # record explicit human authorization, then run the gated scan
+        # ---- SHARED (both paths, unchanged): record explicit human
+        # authorization, then derive scope. The planner NEVER creates or
+        # modifies authorization — this record is what GuardrailGate reads. ----
         try:
             self._scanner.grant_authorization(target, validity_hours=24)
         except Exception as exc:
             return await update.message.reply_text(f"授權記錄失敗：{exc}")
         from app.bounty.models import ProgramScope
+        host = target.split("://")[-1].split("/")[0]
+        scope = ProgramScope(domains=[host])
+        self._pending_scan.pop(str(update.effective_chat.id), None)
+        chat_id = update.effective_chat.id
+
+        # ---- FORK (only here): agent loop vs legacy build_phased_profile. ----
+        # feature flag ELIANA_AGENT__LOOP_ENABLED (default OFF) selects the path.
+        # When ON, the agent path internally falls back to the legacy GATED path
+        # on PlannerUnavailable (fail-closed to a gated path, never raw exec).
+        if self._agent_loop_enabled() and self._agent is not None:
+            await self._start_agent_assessment(update, chat_id, target, scope)
+        else:
+            await self._start_legacy_assessment(update, chat_id, target, scope)
+
+    # -- feature flag ---------------------------------------------------- #
+    @staticmethod
+    def _agent_loop_enabled() -> bool:
+        """ELIANA_AGENT__LOOP_ENABLED: default OFF. Any of 1/true/yes/on enables
+        the agent planning loop; anything else (incl. unset) keeps the legacy
+        build_phased_profile path so production behavior is unchanged by default."""
+        return os.environ.get("ELIANA_AGENT__LOOP_ENABLED", "").strip().lower() \
+            in ("1", "true", "yes", "on")
+
+    # -- legacy path (unchanged behavior; also the fallback) ------------- #
+    async def _start_legacy_assessment(self, update, chat_id, target, scope) -> None:
+        """The pre-agent path: build_phased_profile -> scanner.scan. This is the
+        default when the flag is off, and the fail-closed fallback when the
+        planner is unavailable. It is itself gated (eval-mode allowlist +
+        authorization), never raw tool execution."""
         from app.bounty.scanner import build_phased_profile
         from app.bounty.enums import ScanTool
         host = target.split("://")[-1].split("/")[0]
-        scope = ProgramScope(domains=[host])
-        # 成長閉環-2：回想過往評估經驗，推導「對這類目標較有產出的評估工具」，
-        # 讓這次的工具編排在階段內把高產出工具提前（越評估越懂先用哪些）。
+        # 成長閉環-2：回想過往評估經驗，推導「對這類目標較有產出的評估工具」。
         prio_tools = []
         mem = getattr(self._scanner, "_assessment_memory", None)
         if mem is not None:
@@ -154,21 +187,107 @@ class TelegramRuntime:
                 prio_tools = [name2tool[n] for n in names if n in name2tool]
             except Exception:
                 prio_tools = []
-        # 多工具階段化評估（評估模式；build_phased_profile 自動過濾非評估工具、
-        # 填入評估白名單 args）。依方法論 recon→enumeration→vuln_scanning 編排。
         profile = build_phased_profile(prioritize_tools=prio_tools)
-        self._pending_scan.pop(str(update.effective_chat.id), None)
-
         tool_names = ", ".join(t.value for t in profile.tools)
         await update.message.reply_text(
             f"已授權 {target}，開始多工具評估（評估模式）。\n"
             f"編排工具：{tool_names}\n"
             f"方法論階段：偵察 → 列舉 → 漏洞掃描\n"
             f"這會花幾分鐘，完成後我會回報結果，請稍候…")
+        task = asyncio.create_task(
+            self._run_assessment(chat_id, target, scope, profile))
+        self._running_assessments[str(chat_id)] = task
 
-        # 背景執行，避免阻塞 handler；完成後主動把結果發回此對話。
-        # 記住 task handle，讓 /stop 能中止這次掃描（per chat）。
-        chat_id = update.effective_chat.id
+    # -- agent path (new; falls back to legacy on PlannerUnavailable) ---- #
+    async def _start_agent_assessment(self, update, chat_id, target, scope) -> None:
+        """New path: construct an AssessmentGoal and run PlanningLoop. On
+        PlannerUnavailable, fall back to the legacy GATED path (fail-closed)."""
+        await update.message.reply_text(
+            f"已授權 {target}，開始 agent 規劃評估（評估模式，實驗性）。\n"
+            f"規劃核心：本地模型；每步經授權閘門把關。\n"
+            f"這會花幾分鐘，完成後我會回報結果，請稍候…")
+        task = asyncio.create_task(
+            self._run_agent_assessment(update, chat_id, target, scope))
+        self._running_assessments[str(chat_id)] = task
+
+    async def _run_agent_assessment(self, update, chat_id, target, scope) -> None:
+        """Background: run PlanningLoop; on PlannerUnavailable fall back to the
+        legacy gated path. Reports results to the chat (honest)."""
+        from agent_core.models import AssessmentGoal
+        from agent_core.planning_loop import PLANNER_UNAVAILABLE_REASON
+        goal = AssessmentGoal(target_url=target, scope=scope,
+                              description="assess web_app attack surface")
+        try:
+            outcome = await self._agent["loop"].run(goal)
+        except asyncio.CancelledError:
+            try:
+                await self._app.bot.send_message(
+                    chat_id=int(chat_id),
+                    text=f"🛑 已中止 agent 評估：{target}")
+            except Exception:
+                logger.warning("agent cancel notice send failed")
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # any unexpected agent-path error -> fall back to the gated legacy path
+            logger.warning("agent path error, falling back to legacy: %s", exc)
+            await self._fallback_to_legacy(update, chat_id, target, scope,
+                                           reason=str(exc))
+            return
+        finally:
+            self._running_assessments.pop(str(chat_id), None)
+
+        # planner unavailable -> fail closed to the legacy GATED path
+        if outcome.stopped_reason == PLANNER_UNAVAILABLE_REASON:
+            await self._fallback_to_legacy(update, chat_id, target, scope,
+                                           reason="planner unavailable")
+            return
+
+        findings = outcome.findings
+        dist: dict[str, int] = {}
+        for f in findings:
+            sev = f.get("severity", "info") if isinstance(f, dict) else "info"
+            dist[sev] = dist.get(sev, 0) + 1
+        dist_str = ", ".join(f"{k}:{n}" for k, n in dist.items()) if dist else "無"
+        steps = len(outcome.trace.steps)
+        lines = [
+            f"✅ agent 評估完成：{target}",
+            f"規劃步數：{steps}",
+            f"發現項目：{len(findings)}",
+            f"嚴重度分佈：{dist_str}",
+            f"停止原因：{outcome.stopped_reason}",
+        ]
+        if not findings:
+            lines.append("（本次評估未發現項目——這是真實結果）")
+        try:
+            await self._app.bot.send_message(chat_id=int(chat_id),
+                                             text="\n".join(lines))
+        except Exception:
+            logger.warning("agent result send failed")
+
+    async def _fallback_to_legacy(self, update, chat_id, target, scope,
+                                  reason: str) -> None:
+        """Fail-closed fallback: run the legacy GATED path when the agent path
+        cannot proceed. Never raw execution — build_phased_profile is gated."""
+        try:
+            await self._app.bot.send_message(
+                chat_id=int(chat_id),
+                text=(f"ℹ️ agent 規劃不可用（{reason}），退回既有閘門評估流程。"))
+        except Exception:
+            pass
+        from app.bounty.scanner import build_phased_profile
+        from app.bounty.enums import ScanTool
+        host = target.split("://")[-1].split("/")[0]
+        prio_tools = []
+        mem = getattr(self._scanner, "_assessment_memory", None)
+        if mem is not None:
+            try:
+                names = mem.recommend_priority_tools("web_app",
+                        query=f"assessment of {host}")
+                name2tool = {t.value: t for t in ScanTool}
+                prio_tools = [name2tool[n] for n in names if n in name2tool]
+            except Exception:
+                prio_tools = []
+        profile = build_phased_profile(prioritize_tools=prio_tools)
         task = asyncio.create_task(
             self._run_assessment(chat_id, target, scope, profile))
         self._running_assessments[str(chat_id)] = task
@@ -471,6 +590,34 @@ def build_subsystems():
                                     assessment_memory=assessment_memory)
     except Exception as exc:
         logger.warning("scan subsystem not wired: %s", exc)
+
+    # Agent core (task 10.1): assemble the PlanningLoop from the SAME existing
+    # pieces (engine / attack mapper / assessment_memory / authorization record).
+    # Built unconditionally so it's ready, but only USED when the
+    # ELIANA_AGENT__LOOP_ENABLED flag is on (default off -> legacy path).
+    agent = None
+    if scanner is not None:
+        try:
+            from app.bounty.attack_mapping import map_finding_to_attack
+            from agent_core.eliana.mcp_server import ElianaMCPServer
+            from agent_core.eliana.local_planner import LocalPlannerLLM
+            from agent_core.eliana.memory_adapter import MemoryAdapter
+            from agent_core.guardrail import GuardrailGate
+            from agent_core.planning_loop import PlanningLoop
+
+            mcp = ElianaMCPServer(scan_engine=engine,
+                                  attack_mapper=map_finding_to_attack,
+                                  memory=assessment_memory)
+            gate = GuardrailGate()
+            planner_model = os.environ.get("ELIANA_AGENT__MODEL", "llama3.2:3b")
+            planner = LocalPlannerLLM(base_url=base_url, model=planner_model)
+            mem_adapter = MemoryAdapter(assessment_memory)
+            # AuthorizationPort = the AuthorizedScanner's is_authorized record check.
+            loop = PlanningLoop(planner=planner, gate=gate, tools=mcp,
+                                authorizer=scanner, memory=mem_adapter)
+            agent = {"loop": loop}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("agent core not wired: %s", exc)
     rm = ResourceMonitor(ssh_channel=ssh)
     # /learn knowledge store: writes taught knowledge into the dashboard's
     # knowledge base (ariel_knowledge = 面板「你教的」). Separate persist dir
@@ -481,13 +628,14 @@ def build_subsystems():
         knowledge_store = KnowledgeStore()
     except Exception as exc:
         logger.warning("knowledge store not wired: %s", exc)
-    return personality, rm, scanner, knowledge_store
+    return personality, rm, scanner, knowledge_store, agent
 
 
 def main() -> int:
-    personality, rm, scanner, knowledge_store = build_subsystems()
+    personality, rm, scanner, knowledge_store, agent = build_subsystems()
     rt = TelegramRuntime(personality=personality, resource_monitor=rm,
-                         scanner=scanner, knowledge_store=knowledge_store)
+                         scanner=scanner, knowledge_store=knowledge_store,
+                         agent=agent)
     app = rt.build()
 
     async def _post_init(application):
