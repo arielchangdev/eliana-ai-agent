@@ -467,15 +467,37 @@ class PersonalityAdapter:
             return {}
 
     async def _maybe_evolve(self, hkey: str):
-        """Every N turns, run the personality evolution pipeline and notify on change."""
+        """Every N turns, run the personality evolution pipeline and notify on change.
+
+        觸發計數持久化到 personality.db（evolve_counters 表），服務重啟不歸零，
+        讓「每 N 輪觸發」在真實使用中能跨重啟累積。db 不可用時退回記憶體計數。"""
         if not self._evolve_enabled or not hkey:
             return
-        n = self._evolve_counter.get(hkey, 0) + 1
-        self._evolve_counter[hkey] = n
-        if n < self._evolve_every:
-            return
-        self._evolve_counter[hkey] = 0
+        # 先確保 components（含 db）就緒，計數才能持久化
         comps = await self._ensure_components()
+        db = getattr(self, "_db", None)
+
+        # 讀目前計數（優先 db，否則記憶體）→ +1 → 判斷是否觸發
+        if db is not None:
+            try:
+                n = await db.get_evolve_counter(hkey) + 1
+            except Exception:  # noqa: BLE001 - db 讀失敗退回記憶體
+                n = self._evolve_counter.get(hkey, 0) + 1
+        else:
+            n = self._evolve_counter.get(hkey, 0) + 1
+
+        async def _persist(count: int) -> None:
+            self._evolve_counter[hkey] = count  # 記憶體同步（快取/退路）
+            if db is not None:
+                try:
+                    await db.set_evolve_counter(hkey, count)
+                except Exception:  # noqa: BLE001
+                    pass
+
+        if n < self._evolve_every:
+            await _persist(n)
+            return
+        await _persist(0)  # 觸發後歸零（持久化）
         if comps is None:
             return
         # Build conversation list from short-term history

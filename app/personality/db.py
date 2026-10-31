@@ -62,6 +62,14 @@ CREATE TABLE IF NOT EXISTS community_interactions (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_community_daily ON community_interactions(platform, created_at);
+
+-- 演化觸發計數器（per 對話 key）。持久化到 db，服務重啟不歸零，
+-- 讓「每 N 輪觸發一次演化」在真實使用中能跨重啟累積。
+CREATE TABLE IF NOT EXISTS evolve_counters (
+    history_key TEXT PRIMARY KEY,
+    turn_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -284,3 +292,22 @@ class EvolutionDB:
             (platform, target_day),
         )
         return int(rows[0]["cnt"]) if rows else 0
+
+    # ----- evolve_counters（持久化演化觸發計數） ------------------------- #
+    async def get_evolve_counter(self, history_key: str) -> int:
+        """讀取某對話 key 目前的演化觸發計數（無記錄回 0）。"""
+        rows = await self._query(
+            "SELECT turn_count FROM evolve_counters WHERE history_key = ?",
+            (history_key,),
+        )
+        return int(rows[0]["turn_count"]) if rows else 0
+
+    async def set_evolve_counter(self, history_key: str, count: int) -> None:
+        """寫回某對話 key 的演化觸發計數（upsert）。"""
+        await self._execute(
+            "INSERT INTO evolve_counters (history_key, turn_count, updated_at) "
+            "VALUES (?, ?, ?) "
+            "ON CONFLICT(history_key) DO UPDATE SET "
+            "turn_count = excluded.turn_count, updated_at = excluded.updated_at",
+            (history_key, int(count), _utcnow_iso()),
+        )
