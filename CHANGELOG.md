@@ -170,6 +170,29 @@ Chroma, same pattern as conversation memory).
 
 ---
 
+## Follow-up — personality self-evolution actually works in production (`66c707d`, `b63b530`)
+
+Personality evolution had never once applied in production (`evolution_log`
+empty, version stuck at v1) despite the mechanism being implemented. Root-caused
+three stacked bugs, each hiding the next: (1) the evolve model
+`gemini-flash-latest` returned persistent 503s so analysis timed out to `None`
+— switched the default to `gemini-2.5-flash`; (2) the JSON extractor grabbed a
+stray empty `{}` that small models emit before the real object — now skips empty
+objects; (3) the real root cause — the analysis prompt never specified the
+numeric parameter keys `extract_suggestions` expects, so the LLM returned nested
+prose and every signal was dropped — the prompt now asks for
+`emoji_frequency`/`proactiveness`/`humor_ratio` as -5..+5 values. Verified end to
+end: a 5-turn conversation fires evolution, writes `applied` log rows, and moves
+the profile v1→v2 within the ≤5% per-change cap (test-triggered change rolled
+back so production starts clean).
+
+Separately, the "evolve every N turns" trigger counter was in-memory only and
+reset on every service restart, so it rarely reached the threshold in real use.
+It is now persisted in `personality.db` (new `evolve_counters` table) and
+survives restarts, with an in-memory fallback if the db is unavailable.
+
+---
+
 ## Runtime / deployment notes
 
 - Services run under systemd as user `eliana` on the agent VM:
@@ -177,7 +200,8 @@ Chroma, same pattern as conversation memory).
   `eliana-telegram`, `eliana-electrum` (testnet-locked).
 - Config via env files; de-identified placeholders in the repo must be set to
   real values on the host (`ELIANA_BOUNTY__DB`, `ELIANA_WEAPON__*`,
-  `ELIANA_MEMORY__DIR`, `ELIANA_KNOWLEDGE__DIR`, dashboard `ELIANA_DASH__*`).
+  `ELIANA_MEMORY__DIR`, `ELIANA_KNOWLEDGE__DIR`, `ELIANA_EVOLVE__MODEL`,
+  dashboard `ELIANA_DASH__*`).
 - Assessment memory persists under the memory dir in the
   `eliana_assessment_memory` Chroma collection, separate from
   `eliana_conversations`.
