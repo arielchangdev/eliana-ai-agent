@@ -73,25 +73,48 @@ class ConversationAnalyzer:
         return None
 
     def _build_prompt(self, conversation: list[dict]) -> str:
-        lines = ["分析以下對話的用詞偏好與語氣模式，回傳 JSON："]
+        """要 LLM 針對三個可演化參數各給一個 -5~+5 的建議調整值（數值百分比）。
+
+        關鍵：prompt 要的格式必須對齊 extract_suggestions 期待的扁平數值鍵
+        （emoji_frequency / proactiveness / humor_ratio）。先前只說「回 JSON」
+        而沒規定鍵，LLM 自由回巢狀文字描述，解析後 signals 全空、changes 空、
+        演化從不套用——這裡把格式契約講死，杜絕那個無聲失敗。"""
+        lines = [
+            "你是人格調校分析器。根據以下對話，判斷使用者偏好，對 Eliana 的三個"
+            "人格參數各建議一個「相對調整百分比」，範圍 -5 到 +5 的整數或小數"
+            "（正=增加、負=減少、0=維持）：",
+            "- emoji_frequency：表情符號使用頻率",
+            "- proactiveness：回應的主動性",
+            "- humor_ratio：幽默語氣比例",
+            "",
+            "對話：",
+        ]
         for turn in conversation:
             role = turn.get("role", "user")
             content = turn.get("content", "")
             lines.append(f"[{role}] {content}")
+        lines.append("")
         lines.append(
-            '請回傳格式：{"tone_signals": {...}, "preference_signals": {...}, '
-            '"summary": "..."}'
+            "只回傳一個 JSON 物件，鍵為上述三個參數名，值為 -5~+5 的數字，"
+            "外加 summary。格式："
+            '{"signals": {"emoji_frequency": 0, "proactiveness": 0, '
+            '"humor_ratio": 0}, "summary": "..."}'
         )
         return "\n".join(lines)
 
     def _parse_response(self, raw: str, conv_id: str) -> Optional[AnalysisResult]:
         try:
             data = json.loads(_extract_json(raw))
+            # 新契約：扁平 {"signals": {emoji_frequency/proactiveness/humor_ratio}}。
+            # 放進 preference_signals，讓 extract_suggestions 的 {**tone, **pref}
+            # 讀得到。仍相容舊格式（tone_signals / preference_signals 各自帶鍵）。
+            flat = _coerce_signal_map(data.get("signals", {}))
+            pref = _coerce_signal_map(data.get("preference_signals", {}))
+            pref.update(flat)  # 新契約優先
             return AnalysisResult(
                 conversation_id=conv_id,
                 tone_signals=_coerce_signal_map(data.get("tone_signals", {})),
-                preference_signals=_coerce_signal_map(
-                    data.get("preference_signals", {})),
+                preference_signals=pref,
                 summary=str(data.get("summary", "")),
             )
         except (json.JSONDecodeError, ValueError, TypeError):
@@ -170,33 +193,47 @@ def _strip_code_fence(raw: str) -> str:
 
 
 def _balanced_json_object(text: str) -> Optional[str]:
-    """從第一個 '{' 起，依括號配對找出平衡的 JSON 物件（忽略字串內的括號）。
-    比 rfind('}') 穩健：避免抓到後續說明文字裡的 '}' 或多個物件黏在一起。"""
-    start = text.find("{")
-    if start == -1:
-        return None
-    depth = 0
-    in_str = False
-    esc = False
-    for i in range(start, len(text)):
-        ch = text[i]
-        if in_str:
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == '"':
-                in_str = False
-            continue
-        if ch == '"':
-            in_str = True
-        elif ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start:i + 1]
-    return None
+    """依括號配對找出平衡的 JSON 物件（忽略字串內的括號）。
+    比 rfind('}') 穩健：避免抓到後續說明文字裡的 '}' 或多個物件黏在一起。
+
+    會**跳過空物件**：小模型常在真正的 JSON 前先吐一個 '{}'（實測 llama3.2
+    就這樣），若抓到的物件內容為空（去掉空白只剩 '{}'），就從下一個 '{' 繼續
+    找，直到找到有內容的物件為止。這避免分析「成功卻全空」的無聲失敗。"""
+    search_from = 0
+    while True:
+        start = text.find("{", search_from)
+        if start == -1:
+            return None
+        depth = 0
+        in_str = False
+        esc = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start:i + 1]
+                    # 跳過空物件（去掉內部空白後只剩 "{}"）
+                    if candidate.replace(" ", "").replace("\n", "").replace(
+                            "\t", "").replace("\r", "") == "{}":
+                        break  # 從這個物件之後繼續找下一個
+                    return candidate
+        else:
+            # 內層 for 跑完沒 break 也沒 return（括號未平衡）→ 放棄
+            return None
+        search_from = i + 1
 
 
 def _extract_json(raw: str) -> str:

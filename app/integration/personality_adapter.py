@@ -263,7 +263,11 @@ class PersonalityAdapter:
         # dedicated backend for background evolution analysis (separate quota pool)
         self._evolve_backend = None
         if _key:
-            evolve_model = os.environ.get("ELIANA_EVOLVE__MODEL", "gemini-flash-latest")
+            # Default to gemini-2.5-flash: the "gemini-flash-latest" alias was
+            # observed returning persistent 503 UNAVAILABLE (high demand), which
+            # made background evolution analysis time out and silently never
+            # apply. 2.5-flash verified healthy (HTTP 200) for this task.
+            evolve_model = os.environ.get("ELIANA_EVOLVE__MODEL", "gemini-2.5-flash")
             self._evolve_backend = _GeminiBackend(_key, evolve_model)
         self.force_mode = None  # None | 'local' | 'cloud' (set via /local /cloud)
         self._history = {}
