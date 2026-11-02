@@ -1,0 +1,3 @@
+{"template-id": "broken", "info": {"severity": "high"  <-- truncated json never closes
+not json at all
+{bad}

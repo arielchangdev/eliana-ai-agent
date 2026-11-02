@@ -242,6 +242,19 @@ class TelegramRuntime:
                                            reason="planner unavailable")
             return
 
+        # Persist the agent run to bounty.db (live-wiring Task 6.2) so the
+        # dashboard (a separate process reading bounty.db) sees the scan +
+        # findings + reports. Reuses the legacy schema/primitives/report path.
+        # A persistence failure is logged but must NOT drop the honest in-memory
+        # result we already have — the user still gets the findings summary.
+        persister = (self._agent or {}).get("persister")
+        if persister is not None:
+            try:
+                scan_id = await persister.persist(outcome)
+                logger.info("agent_run_persisted", scan_id=scan_id, target=target)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("agent run persistence failed: %s", exc)
+
         findings = outcome.findings
         dist: dict[str, int] = {}
         for f in findings:
@@ -615,7 +628,15 @@ def build_subsystems():
             # AuthorizationPort = the AuthorizedScanner's is_authorized record check.
             loop = PlanningLoop(planner=planner, gate=gate, tools=mcp,
                                 authorizer=scanner, memory=mem_adapter)
-            agent = {"loop": loop}
+            # Persistence (live-wiring Task 6.2): reuse the SAME bounty.db path
+            # and report LLM the legacy scanner uses, so agent runs write
+            # shape-identical scans/vulnerabilities rows + reports the dashboard
+            # already reads. Does NOT call AuthorizedScanner.scan.
+            from app.bounty.agent_run_persister import AgentRunPersister
+            persister = AgentRunPersister(
+                db_path=bounty_db, report_llm=report_llm,
+                assessment_memory=assessment_memory)
+            agent = {"loop": loop, "persister": persister}
         except Exception as exc:  # noqa: BLE001
             logger.warning("agent core not wired: %s", exc)
     rm = ResourceMonitor(ssh_channel=ssh)

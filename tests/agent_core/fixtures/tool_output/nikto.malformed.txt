@@ -1,0 +1,3 @@
+@@@ garbage output with no plus-prefixed finding lines @@@
+random bytes 0x00 not nikto format
+===== !!!!! =====

@@ -30,24 +30,32 @@ from agent_core.models import (
 from app.bounty.models import ProgramScope
 
 
+from app.bounty.scanner import ScanEngine
+from app.bounty.enums import ScanTool
+import tests.agent_core.tool_output_fixtures as fx
+
+
 # --- stubs at the external edges ------------------------------------------- #
 class StubEngine:
-    """Stands in for ScanEngine.run_tool — records dispatches, returns fixed
-    output. Never touches a real host."""
+    """Faithful ScanEngine fake — records dispatches and returns a REAL captured
+    fixture for the dispatched tool (so the rewritten _parse_recon_output
+    exercises the real legacy parser). _parse_tool_output delegates to the real
+    ScanEngine (no reinvention). Records the target it saw so the e2e can assert
+    the authorized target reached the engine. Never touches a real host."""
     def __init__(self):
         self.dispatched = []
+        self.targets = []
+        self._real = ScanEngine()
     def run_tool(self, tool, target, args, timeout=1800.0):
         self.dispatched.append((tool, list(args)))
-        return f"stub output for {getattr(tool, 'value', tool)}: open 443/tcp"
-
-
-def _attack_mapper(tool, title="", description=""):
-    class _T:
-        technique_id = "T1046"
-        technique_name = "Network Service Discovery"
-        tactic_id = "TA0007"
-        tactic_name = "Discovery"
-    return _T()
+        self.targets.append(target)
+        # return the real findings-bearing fixture for this tool
+        try:
+            return fx.load_fixture(tool, "finding")
+        except Exception:
+            return ""
+    def _parse_tool_output(self, tool, raw_output, scan_id="", target=""):
+        return self._real._parse_tool_output(tool, raw_output, scan_id, target)
 
 
 class StubAuthorizer:
@@ -102,8 +110,10 @@ def _invoke(tool):
 
 
 def _build_loop(planner, memory, authorizer, engine):
-    """Assemble the loop exactly as production does (minus real services)."""
-    mcp = ElianaMCPServer(scan_engine=engine, attack_mapper=_attack_mapper,
+    """Assemble the loop exactly as production does (minus real services).
+    No attack_mapper injection: _parse_recon_output calls module-level
+    map_finding_to_attack directly, same as legacy execute_scan."""
+    mcp = ElianaMCPServer(scan_engine=engine,
                           memory=None)   # record goes through MemoryPort, not MCP here
     gate = GuardrailGate()
     return PlanningLoop(planner=planner, gate=gate, tools=mcp,
@@ -111,16 +121,16 @@ def _build_loop(planner, memory, authorizer, engine):
 
 
 # --- the end-to-end test ---------------------------------------------------- #
-def test_e2e_full_chain_gated_and_records():
-    # Drive to a NORMAL-COMPLETION path that records experience. The loop records
-    # on "no further progress" and "step budget reached" (NOT on planner-STOP).
-    # Here max_steps=3: nmap(ALLOW), sqlmap(DENY), sslscan(ALLOW) exhausts the
-    # budget -> records. (The planner-STOP-does-not-record behavior is asserted
-    # separately in test_e2e_planner_stop_path below.)
+def test_e2e_full_chain_gated_produces_real_findings():
+    # LIVE-WIRING (Task 6.1): the loop now FORWARDS the gate-built ctx into
+    # invoke, so the recon branch receives the real authorized target and the
+    # real parser produces real findings. The gate still gates (sqlmap DENY),
+    # the chain still connects, the one-time token still flows — the only change
+    # from the Wave-1 honest-empty state is that findings are now REAL.
     planner = ScriptedPlanner([
-        _invoke("nmap"),      # ALLOW -> dispatch -> observation
+        _invoke("nmap"),      # ALLOW -> real target -> 2 INFO findings (T1046)
         _invoke("sqlmap"),    # excluded -> gate DENY, no observation
-        _invoke("sslscan"),   # ALLOW -> dispatch -> observation; budget reached
+        _invoke("sslscan"),   # ALLOW -> 1 MEDIUM finding (T1600); budget reached
     ])
     memory = RecordingMemory()
     authorizer = StubAuthorizer(ok=True)
@@ -136,48 +146,40 @@ def test_e2e_full_chain_gated_and_records():
     # --- chain connected: gate consulted the authorization record ---------- #
     assert authorizer.checks, "gate never consulted the AuthorizationPort"
 
-    # --- trace shows gated decisions: 2 ALLOW (nmap, sslscan) + 1 DENY ------ #
-    assert outcome.stopped_reason == "step budget reached"
+    # --- the engine saw the AUTHORIZED, non-empty target (regression guard) - #
+    assert engine.targets, "engine was never dispatched"
+    assert all(t for t in engine.targets), "empty target reached the engine"
+    # nmap + sslscan ran; sqlmap was DENYed and never dispatched
+    dispatched_tools = [getattr(t, "value", t) for t, _ in engine.dispatched]
+    assert dispatched_tools == ["nmap", "sslscan"], dispatched_tools
+
+    # --- all three budget steps are present; the middle one is a DENY ------- #
     steps = outcome.trace.steps
     assert len(steps) == 3
-    allow = [s for s in steps if s.gate.outcome == GateOutcome.ALLOW and s.observation]
-    deny = [s for s in steps
-            if s.gate.outcome == GateOutcome.DENY
-            and s.decision.kind == DecisionKind.INVOKE_TOOL]
-    assert len(allow) == 2, f"expected 2 ALLOW+obs steps, got {len(allow)}"
-    assert len(deny) == 1, f"expected 1 real DENY step, got {len(deny)}"
-    # the DENY was the excluded sqlmap, and it produced NO observation
-    assert deny[0].decision.tool_call.tool_name == "sqlmap"
-    assert deny[0].observation is None
-    assert "not permitted" in deny[0].gate.reason
+    assert steps[0].gate.outcome == GateOutcome.ALLOW
+    assert steps[0].decision.tool_call.tool_name == "nmap"
+    assert steps[0].gate.token, "ALLOW step missing one-time token"
+    assert steps[1].gate.outcome == GateOutcome.DENY          # sqlmap excluded
+    assert steps[2].gate.outcome == GateOutcome.ALLOW
+    assert outcome.stopped_reason == "step budget reached"
 
-    # --- MCP server actually dispatched only the 2 ALLOWed tools ----------- #
-    dispatched_tools = [getattr(t, "value", t) for t, _ in engine.dispatched]
-    assert dispatched_tools == ["nmap", "sslscan"]
-    # eval-mode args were forced (non-empty for nmap)
-    assert all(isinstance(args, list) for _, args in engine.dispatched)
-
-    # --- ALLOW steps carried a real one-time token to the MCP server ------- #
-    for s in allow:
-        assert s.gate.token, "ALLOW step missing one-time token"
-
-    # --- observations produced findings carrying ATT&CK label (honest) ----- #
-    assert len(outcome.findings) == 2
+    # --- REAL findings now flow (not honest-empty, not fabricated): nmap's --
+    # --- 2 INFO (T1046) + sslscan's 1 MEDIUM (T1600). Each carries an ATT&CK -
+    # --- label and NO raw payload (projection honesty). --------------------- #
+    assert len(outcome.findings) == 3, outcome.findings
+    sevs = sorted(f["severity"] for f in outcome.findings)
+    assert sevs == ["info", "info", "medium"], sevs
     for f in outcome.findings:
-        assert f.get("attack_technique_id") == "T1046"
-        assert "payload" not in f
-
-    # --- learning loop closed: record_experience was called on completion -- #
-    # (STOP after findings -> normal completion path records experience)
-    assert memory.recorded is not None, "record() was never called"
-    assert memory.recorded["tools_used"] == ["nmap", "sslscan"]
+        assert f.get("attack_technique_id"), f
+        assert "raw_output" not in f and "evidence" not in f
 
 
 def test_e2e_planner_stop_after_real_work_records():
     """A planner-initiated STOP AFTER real assessment work is a normal
     completion -> it records experience (same _record_experience / tools_used as
-    the other two exit paths). Here nmap runs (ALLOW + finding), then the planner
-    STOPs -> record fires because a tool ran and findings accumulated."""
+    the other two exit paths). With ctx forwarding (Task 6.1), nmap runs (ALLOW
+    + real findings), then the planner STOPs -> record fires because a tool ran
+    and findings accumulated."""
     planner = ScriptedPlanner([
         _invoke("nmap"),
         PlannerDecision(kind=DecisionKind.STOP, rationale="assessment complete"),
@@ -186,12 +188,14 @@ def test_e2e_planner_stop_after_real_work_records():
     engine = StubEngine()
     loop = _build_loop(planner, memory, StubAuthorizer(ok=True), engine)
     outcome = asyncio.run(loop.run(_goal()))
+    # nmap ALLOW -> real target -> 2 INFO findings; next decision is STOP, which
+    # is a normal completion that records (tool ran AND findings accumulated).
     assert outcome.stopped_reason == "assessment complete"
-    # the real tool ran and produced a finding (chain worked)
-    assert len(outcome.findings) == 1
-    # NEW behavior: STOP after real work records experience
+    assert len(outcome.findings) == 2
+    assert all(f["severity"] == "info" for f in outcome.findings)
     assert memory.recorded is not None
     assert memory.recorded["tools_used"] == ["nmap"]
+    assert len(memory.recorded["findings"]) == 2
 
 
 def test_e2e_first_step_stop_no_tool_does_not_record():
@@ -228,22 +232,44 @@ def test_e2e_stop_after_only_denies_does_not_record():
     assert memory.recorded is None          # no real work -> no record
 
 
-def test_e2e_budget_exhaustion_path_records():
-    """The 'step budget reached' completion path DOES record experience. A
-    never-STOP planner proposing an ALLOWable tool each step exhausts the budget
-    and records on completion."""
+class _EmptyOutputEngine(StubEngine):
+    """Dispatches for real (target threaded) but the tool genuinely returns
+    EMPTY output — exercises the honest-empty path AFTER ctx forwarding: the
+    engine IS called with the authorized target, the real parser yields zero
+    findings, and the loop stops on 'no further progress' WITHOUT fabricating."""
+    def run_tool(self, tool, target, args, timeout=1800.0):
+        self.dispatched.append((tool, list(args)))
+        self.targets.append(target)
+        return ""   # real empty output -> real parser -> zero findings
+
+
+def test_e2e_honest_empty_on_genuinely_empty_tool_output():
+    """With ctx forwarding (Task 6.1) the engine IS dispatched with the real
+    target, but when a tool genuinely returns nothing the parser yields zero
+    findings and the loop stops on 'no further progress' — honest-empty, never
+    a fabricated placeholder. This is the safety-net that the root-cause bug
+    (fabricated {'severity':'info'}) can never come back."""
     planner = ScriptedPlanner([_invoke("nmap"), _invoke("sslscan")])
     memory = RecordingMemory()
-    engine = StubEngine()
+    engine = _EmptyOutputEngine()
     goal = AssessmentGoal(
         target_url="https://app.example.com",
         scope=ProgramScope(domains=["app.example.com"]),
         description="assess web_app attack surface", max_steps=2)
     loop = _build_loop(planner, memory, StubAuthorizer(ok=True), engine)
     outcome = asyncio.run(loop.run(goal))
-    assert outcome.stopped_reason == "step budget reached"
+    assert outcome.stopped_reason == "no further progress"
+    assert len(outcome.trace.steps) == 1       # stopped after first ALLOW
+    # the engine WAS called (ctx forwarded) with the authorized, non-empty target
+    assert len(engine.dispatched) == 1
+    assert engine.targets and all(t for t in engine.targets)
+    # but zero findings (honest-empty), no fabrication
+    assert outcome.findings == []
+    # no-progress path records; tools_used counts the ALLOW step that produced
+    # an (empty) observation, so it is ['nmap'] even though there were 0 findings
     assert memory.recorded is not None
-    assert memory.recorded["tools_used"] == ["nmap", "sslscan"]
+    assert memory.recorded["tools_used"] == ["nmap"]
+    assert memory.recorded["findings"] == []
 
 
 def test_e2e_unauthorized_target_denied_end_to_end():

@@ -1,0 +1,15 @@
+Version: 2.0.15
+Connected to 198.51.100.23
+
+Testing SSL server 198.51.100.23 on port 443
+
+  SSL/TLS Protocols:
+SSLv2     disabled
+SSLv3     disabled
+TLSv1.0   enabled
+TLSv1.1   enabled
+TLSv1.2   enabled
+TLSv1.3   disabled
+
+  Heartbleed:
+TLSv1.2 not vulnerable to heartbleed

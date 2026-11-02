@@ -1,0 +1,4 @@
+/admin                (Status: 301) [Size: 169] [--> /admin/]
+/images               (Status: 301) [Size: 169] [--> /images/]
+/index.html           (Status: 200) [Size: 10701]
+/robots.txt           (Status: 200) [Size: 24]

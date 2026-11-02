@@ -1,0 +1,13 @@
+- Nikto v2.5.0
+---------------------------------------------------------------------------
++ Target IP:          198.51.100.23
++ Target Hostname:    198.51.100.23
++ Target Port:        80
++ Start Time:         2023-11-14 10:00:00 (GMT0)
+---------------------------------------------------------------------------
++ Server: nginx/1.18.0
++ /: The anti-clickjacking X-Frame-Options header is not present.
++ OSVDB-3233: /icons/README: Apache default file found.
++ /admin/: This might be interesting: directory listing enabled.
++ End Time:           2023-11-14 10:00:20 (GMT0) (20 seconds)
+---------------------------------------------------------------------------

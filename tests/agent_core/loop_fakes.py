@@ -96,13 +96,19 @@ class FakeTools:
         self._specs = tool_specs or [ToolSpec("recon_scan", "recon")]
         self.invoke_calls = 0
         self.seen_tokens = []
+        self.seen_ctx = []   # GateContext objects the loop forwarded (Task 6.1)
 
     def list_tools(self):
         return list(self._specs)
 
-    async def invoke(self, call, approval):
+    async def invoke(self, call, approval, ctx=None):
+        # ctx is the optional GateContext the loop now forwards (live-wiring
+        # Task 6.1). This fake ignores the real target (it returns canned
+        # findings), but records that a ctx was threaded so the loop-forwarding
+        # assertion can verify it.
         self.invoke_calls += 1
         self.seen_tokens.append(getattr(approval, "token", None))
+        self.seen_ctx.append(ctx)
         return Observation(tool_name=call.tool_name,
                            findings=[dict(f) for f in self._findings])
 

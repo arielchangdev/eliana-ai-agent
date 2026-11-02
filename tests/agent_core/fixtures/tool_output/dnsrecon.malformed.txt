@@ -1,0 +1,3 @@
+[*] Performing General Enumeration of Domain: example.com
+[-] Could not resolve domain: no records found
+[*] Enumeration Complete

@@ -30,10 +30,22 @@ import asyncio
 from typing import Optional
 
 # Reuse the single sources of truth. Logic is NOT reimplemented — only wrapped.
-from app.bounty.scanner import _AUTO_ORCHESTRATION_TOOLS, _EVAL_MODE_ARGS
+from app.bounty.scanner import (
+    _AUTO_ORCHESTRATION_TOOLS,
+    _EVAL_MODE_ARGS,
+    deduplicate_findings,
+)
+from app.bounty.attack_mapping import map_finding_to_attack
 from app.bounty.enums import ScanTool
 
-from ..models import GateDecision, GateOutcome, Observation, ToolCall, ToolSpec
+from ..models import (
+    GateContext,
+    GateDecision,
+    GateOutcome,
+    Observation,
+    ToolCall,
+    ToolSpec,
+)
 
 
 class ToolNotApproved(RuntimeError):
@@ -52,6 +64,38 @@ def _resolve_scan_tool(name: str) -> Optional[ScanTool]:
         return ScanTool(name.strip().lower())
     except (ValueError, KeyError):
         return None
+
+
+def _project_finding(v: object) -> dict:
+    """Project a Vulnerability into the planner-facing finding dict.
+
+    Honesty/leash invariant (design Property 5): the planner only ever sees
+    severity + title + affected_endpoint + tool + ATT&CK labels. The raw tool
+    payload (``raw_output``) and ``evidence`` are deliberately NOT included —
+    they are persisted to bounty.db but never fed back into planning. ATT&CK
+    fields are emitted only when a technique was actually mapped (no fabrication:
+    absent -> keys are left out rather than set to None-noise).
+    """
+    severity = getattr(v, "severity", None)
+    # SeverityLevel is an enum; surface its value string (e.g. "info", "high").
+    sev_value = getattr(severity, "value", severity)
+    tool_source = getattr(v, "tool_source", None)
+    tool_value = getattr(tool_source, "value", tool_source)
+
+    finding: dict = {
+        "severity": sev_value,
+        "title": getattr(v, "title", "") or "",
+        "affected_endpoint": getattr(v, "affected_endpoint", "") or "",
+        "tool": tool_value,
+    }
+    tech_id = getattr(v, "attack_technique_id", None)
+    if tech_id:
+        finding["attack_technique_id"] = tech_id
+        finding["attack_technique_name"] = getattr(v, "attack_technique_name", None)
+        tactic = getattr(v, "attack_tactic", None)
+        if tactic:
+            finding["attack_tactic"] = tactic
+    return finding
 
 
 def _recon_tool_enum() -> list[str]:
@@ -201,10 +245,19 @@ class ElianaMCPServer:
             raise ToolNotApproved("approval token already consumed")
 
     # -- approved dispatch ----------------------------------------------- #
-    async def invoke(self, call: ToolCall, approval: GateDecision) -> Observation:
+    async def invoke(self, call: ToolCall, approval: GateDecision,
+                     ctx: Optional[GateContext] = None) -> Observation:
         """Dispatch ONLY if `approval` is an ALLOW issued for this exact call
         with an unused token. Consumes the token on dispatch. Returns an
-        Observation (severity + ATT&CK label only; no payloads)."""
+        Observation (severity + ATT&CK label only; no payloads).
+
+        `ctx` (optional, carries the gated target_url) threads the authorized
+        target into the recon branch. When `ctx` is None the recon target
+        resolves to "" and _do_recon short-circuits to an honest-empty
+        Observation (never scans an unintended host). Non-scan tools
+        (classify/recall/record) ignore `ctx` and behave exactly as before.
+        The planner never supplies the target — it comes only from the
+        gate-built `ctx`."""
         self._assert_approved(call, approval)
         # consume the token FIRST so a re-entrant / repeated invoke with the same
         # token is refused even if dispatch below is slow or retried
@@ -220,49 +273,84 @@ class ElianaMCPServer:
         else:
             # default: a recon/enum scan tool (the gate normalizes ToolCall to a
             # ScanTool-resolvable name and forces eval-mode args).
-            obs = await self._do_recon(approval.call)
+            # Thread the gated target from ctx (never from call.arguments).
+            target = ctx.target_url if ctx is not None else ""
+            obs = await self._do_recon(approval.call, target)
 
         self._audit("dispatched", approval.call)
         return obs
 
     # -- recon_scan: wrap ScanEngine.run_tool (eval-mode args only) ------ #
-    async def _do_recon(self, call: ToolCall) -> Observation:
+    async def _do_recon(self, call: ToolCall, target: str) -> Observation:
+        """Run ONE recon tool against the gated `target` with forced eval-mode
+        args. Honest-empty short-circuit (never scans an unintended host, never
+        fabricates a finding) when target is empty/None or the engine is absent."""
         tool = _resolve_scan_tool(call.tool_name)
         if tool is None:
             # should never happen (gate already resolved it) — fail honest/empty
             return Observation(tool_name=call.tool_name, findings=[], raw_excerpt="")
         if self._scan_engine is None:
             return Observation(tool_name=call.tool_name, findings=[], raw_excerpt="")
-        # arguments come from the normalized approval (eval-mode allowlist). We do
-        # NOT trust call.arguments blindly — re-derive the eval-mode args as a
-        # second guarantee that no intrusive flag reaches run_tool.
+        # SAFETY NET: no real target (ctx omitted/None) -> short-circuit to an
+        # honest-empty Observation. Do NOT call run_tool with an empty target
+        # (that was the root-cause bug: target="" meant "scan nothing").
+        if not target or not str(target).strip():
+            return Observation(tool_name=call.tool_name, findings=[], raw_excerpt="")
+        # arguments come from the eval-mode allowlist. We do NOT trust
+        # call.arguments blindly — re-derive the eval-mode args as a second
+        # guarantee that no intrusive flag reaches run_tool.
         args = list(_EVAL_MODE_ARGS.get(tool, []))
-        target = ""  # supplied by the caller/context in integration; stubbed here
         result = self._scan_engine.run_tool(tool, target, args)
         if asyncio.iscoroutine(result):
             result = await result
-        return self._parse_recon_output(call.tool_name, result)
+        return self._parse_recon_output(call.tool_name, result, target)
 
-    def _parse_recon_output(self, tool_name: str, raw: object) -> Observation:
-        """Parse tool output into an Observation carrying severity + ATT&CK label
-        only — never raw payloads/exploitation detail. Classification (if any) is
-        applied via the attack mapper; raw text is NOT propagated into findings."""
-        findings: list[dict] = []
+    def _parse_recon_output(self, tool_name: str, raw: object,
+                            target: str = "") -> Observation:
+        """Parse tool output into an Observation using the REAL legacy pipeline.
+
+        Reuse-not-reinvent (design D2 / Algorithm 3): delegate to the engine's
+        real per-tool parser dispatcher ``_parse_tool_output``, then the real
+        ``deduplicate_findings``, then ``map_finding_to_attack`` per finding —
+        the exact sequence ``ScanEngine.execute_scan`` runs. No parser logic is
+        reimplemented here.
+
+        Honesty invariants:
+          * Empty/whitespace output -> zero findings (no fabricated placeholder).
+          * Malformed output -> zero findings (the legacy parser's own try/except
+            returns []), identical to the legacy path.
+          * ``Observation.findings`` carry severity + title + affected_endpoint +
+            tool + ATT&CK labels ONLY (``_project_finding``) — never the raw
+            payload / evidence (those are persisted to bounty.db, not fed back to
+            the planner).
+        """
         tool = _resolve_scan_tool(tool_name)
-        technique = None
-        if self._attack_mapper is not None and tool is not None:
-            try:
-                technique = self._attack_mapper(tool)
-            except Exception:  # noqa: BLE001
-                technique = None
-        finding = {"severity": "info", "tool": tool_name}
-        if technique is not None:
-            finding["attack_technique_id"] = getattr(technique, "technique_id", None)
-            finding["attack_technique_name"] = getattr(technique, "technique_name", None)
-        findings.append(finding)
+        if tool is None or self._scan_engine is None:
+            return Observation(tool_name=tool_name, findings=[], raw_excerpt="")
+
+        raw_text = raw if isinstance(raw, str) else str(raw or "")
+        # REUSE the legacy per-tool parser dispatcher (no reinvention). It owns
+        # the try/except that turns malformed output into [] — so the agent path
+        # fails exactly as the legacy path does.
+        vulns = self._scan_engine._parse_tool_output(
+            tool, raw_text, scan_id="", target=target)
+        vulns = deduplicate_findings(vulns)  # REUSE legacy dedup
+
+        findings: list[dict] = []
+        for v in vulns:
+            tech = map_finding_to_attack(
+                v.tool_source, v.title or "", v.description or "")
+            if tech is not None:
+                # Label the Vulnerability in place (same as execute_scan) so the
+                # ATT&CK classification is available to persistence later too.
+                v.attack_technique_id = tech.technique_id
+                v.attack_technique_name = tech.technique_name
+                v.attack_tactic = f"{tech.tactic_id} {tech.tactic_name}"
+            findings.append(_project_finding(v))
         # keep a short, non-sensitive excerpt only (length-capped, no payloads)
-        excerpt = str(raw)[:120] if raw is not None else ""
-        return Observation(tool_name=tool_name, findings=findings, raw_excerpt=excerpt)
+        excerpt = raw_text[:120]
+        return Observation(tool_name=tool_name, findings=findings,
+                           raw_excerpt=excerpt)
 
     # -- classify_attack: wrap map_finding_to_attack --------------------- #
     def _do_classify(self, call: ToolCall) -> Observation:

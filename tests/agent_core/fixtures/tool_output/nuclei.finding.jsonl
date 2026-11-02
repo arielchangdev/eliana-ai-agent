@@ -1,0 +1,3 @@
+{"template-id":"tech-detect","info":{"name":"Technology Detection","severity":"info","description":"Detects technologies used by the target."},"matched-at":"http://198.51.100.23/"}
+{"template-id":"http-missing-security-headers","info":{"name":"Missing Security Headers","severity":"low","description":"HTTP response is missing recommended security headers."},"matched-at":"http://198.51.100.23/"}
+{"template-id":"CVE-2021-41773","info":{"name":"Apache 2.4.49 Path Traversal","severity":"high","description":"Path traversal and file disclosure in Apache HTTP Server 2.4.49.","classification":{"cve-id":["CVE-2021-41773"]}},"matched-at":"http://198.51.100.23/cgi-bin/"}

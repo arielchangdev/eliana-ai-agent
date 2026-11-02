@@ -1,0 +1,2 @@
+%%% sslscan aborted: connection refused, no protocol table produced %%%
+garbage bytes with no protocol lines

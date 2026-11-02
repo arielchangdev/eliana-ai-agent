@@ -13,31 +13,52 @@ import asyncio
 import pytest
 
 from agent_core.eliana.mcp_server import ElianaMCPServer, ToolNotApproved
-from agent_core.models import GateDecision, GateOutcome, Observation, ToolCall
+from agent_core.models import (
+    GateContext, GateDecision, GateOutcome, Observation, ToolCall,
+)
+from app.bounty.models import ProgramScope
+
+# Scan dispatch now requires a ctx carrying the gated target (live-wiring fix:
+# invoke(call, approval, ctx)). Tests that expect the engine to run pass this.
+_AUTH_TARGET = "https://app.example.com"
+
+
+def _ctx():
+    class _A:
+        def is_authorized(self, target_url):
+            return True
+    return GateContext(target_url=_AUTH_TARGET,
+                       scope=ProgramScope(domains=["app.example.com"]),
+                       authorizer=_A())
+
+
+from app.bounty.scanner import ScanEngine
+import tests.agent_core.tool_output_fixtures as fx
 
 
 class StubEngine:
-    """Records whether run_tool was dispatched, and with what args."""
+    """Records whether run_tool was dispatched, and with what args.
+
+    run_tool returns a REAL nmap-XML fixture (two open ports) so the rewritten
+    _parse_recon_output exercises the real legacy parser pipeline and produces a
+    real finding — a faithful fake, not a reinvented parser. _parse_tool_output
+    delegates to the real ScanEngine (the dispatcher the agent path reuses)."""
     def __init__(self):
         self.calls = []
+        self._real = ScanEngine()
+        self._fixture = fx.load_fixture(fx.ScanTool.NMAP, "finding")
     def run_tool(self, tool, target, args, timeout=1800.0):
         self.calls.append((tool, target, list(args)))
-        return "stub tool output: open 80/tcp"
-
-
-def _mapper(tool, title="", description=""):
-    class _T:
-        technique_id = "T1046"
-        technique_name = "Network Service Discovery"
-        tactic_id = "TA0007"
-        tactic_name = "Discovery"
-    return _T()
+        return self._fixture
+    def _parse_tool_output(self, tool, raw_output, scan_id="", target=""):
+        return self._real._parse_tool_output(tool, raw_output, scan_id, target)
 
 
 def _server():
     audit = []
-    srv = ElianaMCPServer(scan_engine=StubEngine(), attack_mapper=_mapper,
-                          audit_sink=audit.append)
+    # No attack_mapper injection: the rewritten _parse_recon_output calls the
+    # module-level map_finding_to_attack directly (same as legacy execute_scan).
+    srv = ElianaMCPServer(scan_engine=StubEngine(), audit_sink=audit.append)
     return srv, audit
 
 
@@ -49,11 +70,12 @@ def _allow(call: ToolCall, token: str = "tok-1") -> GateDecision:
 def test_valid_allow_dispatches_and_returns_observation():
     srv, audit = _server()
     call = ToolCall("nmap", {})
-    obs = asyncio.run(srv.invoke(call, _allow(call)))
+    obs = asyncio.run(srv.invoke(call, _allow(call), _ctx()))
     assert isinstance(obs, Observation)
     assert obs.tool_name == "nmap"
-    # dispatched to the real engine exactly once
+    # dispatched to the real engine exactly once, with the authorized target
     assert len(srv._scan_engine.calls) == 1
+    assert srv._scan_engine.calls[0][1] == _AUTH_TARGET
     # finding carries severity + ATT&CK label only; no raw payload field
     f = obs.findings[0]
     assert f["severity"] == "info"
@@ -103,12 +125,12 @@ def test_reused_token_refused():
     srv, _ = _server()
     call = ToolCall("nmap", {})
     appr = _allow(call, token="tok-3")
-    # first invoke dispatches
-    asyncio.run(srv.invoke(call, appr))
+    # first invoke dispatches (ctx carries the gated target)
+    asyncio.run(srv.invoke(call, appr, _ctx()))
     assert len(srv._scan_engine.calls) == 1
     # second invoke with the SAME token must be refused; no second dispatch
     with pytest.raises(ToolNotApproved):
-        asyncio.run(srv.invoke(call, appr))
+        asyncio.run(srv.invoke(call, appr, _ctx()))
     assert len(srv._scan_engine.calls) == 1
 
 
@@ -117,9 +139,9 @@ def test_token_consumed_even_across_distinct_decisions():
     GateDecision object for the same call."""
     srv, _ = _server()
     call = ToolCall("nmap", {})
-    asyncio.run(srv.invoke(call, _allow(call, token="dup")))
+    asyncio.run(srv.invoke(call, _allow(call, token="dup"), _ctx()))
     with pytest.raises(ToolNotApproved):
-        asyncio.run(srv.invoke(call, _allow(call, token="dup")))
+        asyncio.run(srv.invoke(call, _allow(call, token="dup"), _ctx()))
     assert len(srv._scan_engine.calls) == 1
 
 

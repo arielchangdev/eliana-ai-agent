@@ -1,0 +1,9 @@
+[*] Performing General Enumeration of Domain: example.com
+[*] SOA ns1.example.com 198.51.100.10
+[*] NS ns1.example.com 198.51.100.10
+[*] NS ns2.example.com 198.51.100.11
+[*] MX mail.example.com 198.51.100.20
+[*] A example.com 198.51.100.23
+[*] A www.example.com 198.51.100.23
+[*] TXT example.com v=spf1 include:_spf.example.com ~all
+[*] Enumeration Complete

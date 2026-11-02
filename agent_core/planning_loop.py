@@ -158,7 +158,14 @@ class PlanningLoop:
                 continue
 
             # ---- ACT + OBSERVE (only ALLOW + token reaches the server) ----
-            observation = await self._tools.invoke(gate_decision.call, gate_decision)
+            # Forward the gate-built ctx so the server scans EXACTLY the gated
+            # target (live-wiring fix). The planner never supplies the target —
+            # ctx was constructed above from the human-authorized goal. All loop
+            # invariants (gate/progress/honesty/fail-closed) are unchanged; the
+            # only difference is the recon branch now receives the real target
+            # instead of short-circuiting to honest-empty.
+            observation = await self._tools.invoke(
+                gate_decision.call, gate_decision, ctx)
             # HONESTY invariant: only tool-returned findings are appended; the
             # planner's decision/rationale can never add a finding.
             tool_findings = list(getattr(observation, "findings", []) or [])

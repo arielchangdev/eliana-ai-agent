@@ -1,0 +1,3 @@
+[*] Checking target
+[~] scan interrupted unexpectedly, no verdict line produced
+%%% corrupt %%%
