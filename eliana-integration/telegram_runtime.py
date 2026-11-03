@@ -26,6 +26,29 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("eliana.telegram")
 
 
+def _normalize_scope_target(target: str) -> str:
+    """Add an https:// scheme to a bare host/IP so the GuardrailGate's scope
+    check works. is_target_in_scope() uses urlparse(), which returns
+    hostname=None for a bare IP like "198.51.100.32" (no scheme) and would
+    therefore DENY it. Adding a scheme makes urlparse extract the host.
+
+    This mirrors legacy AuthorizedScanner.scan's `norm` normalization exactly
+    (`target if "://" in target else f"https://{target}"`). It is applied ONLY
+    to the value threaded into GateContext.target_url on the agent path; the
+    tool-facing target is stripped back to a bare host in
+    ElianaMCPServer._do_recon (same split the legacy scan_host uses), so nmap et
+    al. still receive a bare host/IP.
+
+    NOTE: legacy scan() does this normalization inline for its own scope check;
+    this helper is kept local to the agent path to control blast radius. A
+    future cleanup could extract one shared helper used by BOTH paths.
+    """
+    t = (target or "").strip()
+    if not t:
+        return t
+    return t if "://" in t else f"https://{t}"
+
+
 def _load_cfg() -> dict:
     token = os.environ.get("ELIANA_TELEGRAM__BOT_TOKEN", "").strip()
     chat_id = os.environ.get("ELIANA_TELEGRAM__CHAT_ID", "").strip()
@@ -154,8 +177,14 @@ class TelegramRuntime:
         # When ON, the agent path internally falls back to the legacy GATED path
         # on PlannerUnavailable (fail-closed to a gated path, never raw exec).
         if self._agent_loop_enabled() and self._agent is not None:
-            await self._start_agent_assessment(update, chat_id, target, scope)
+            # Agent path: GateContext.target_url must carry a scheme so the gate's
+            # scope check passes for a bare IP (the tool-facing target is stripped
+            # back to a bare host in _do_recon). scope.domains keeps the bare host.
+            agent_target = _normalize_scope_target(target)
+            await self._start_agent_assessment(update, chat_id, agent_target, scope)
         else:
+            # Legacy path normalizes internally in scanner.scan — pass raw target
+            # unchanged (blast radius control: we do not alter legacy behavior).
             await self._start_legacy_assessment(update, chat_id, target, scope)
 
     # -- feature flag ---------------------------------------------------- #

@@ -73,9 +73,12 @@ def test_valid_allow_dispatches_and_returns_observation():
     obs = asyncio.run(srv.invoke(call, _allow(call), _ctx()))
     assert isinstance(obs, Observation)
     assert obs.tool_name == "nmap"
-    # dispatched to the real engine exactly once, with the authorized target
+    # dispatched to the real engine exactly once, with the authorized target as
+    # a BARE host (scheme stripped in _do_recon before run_tool; the gated ctx
+    # carries the scheme'd URL for the scope check)
     assert len(srv._scan_engine.calls) == 1
-    assert srv._scan_engine.calls[0][1] == _AUTH_TARGET
+    assert srv._scan_engine.calls[0][1] == _AUTH_TARGET.split("://")[-1].split("/")[0]
+    assert "://" not in srv._scan_engine.calls[0][1]
     # finding carries severity + ATT&CK label only; no raw payload field
     f = obs.findings[0]
     assert f["severity"] == "info"

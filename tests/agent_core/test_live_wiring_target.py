@@ -29,6 +29,9 @@ from app.bounty.models import ProgramScope
 
 AUTH_TARGET = "https://app.example.com"
 AUTH_SCOPE = ProgramScope(domains=["app.example.com"])
+# The bare host the tool (run_tool) must receive — scheme stripped in _do_recon,
+# mirroring legacy scan_host. The gate still checks scope on the scheme'd URL.
+AUTH_HOST = "app.example.com"
 
 
 # --------------------------------------------------------------------------- #
@@ -42,6 +45,11 @@ class SpyScanEngine:
 
     def __init__(self, authorized_target: str, raw_output: str = ""):
         self._authorized = authorized_target
+        # The tool-facing target is the BARE host (scheme stripped in
+        # _do_recon, mirroring legacy scan_host). The gated target_url may carry
+        # a scheme (needed for the gate's urlparse scope check); tools must get
+        # the bare host. We assert run_tool receives exactly that bare host.
+        self._expected_host = authorized_target.split("://")[-1].split("/")[0]
         self._raw_output = raw_output
         self.calls = []  # list of (tool, target, args)
         self._real = ScanEngine()  # delegate real parsing (faithful fake)
@@ -51,9 +59,12 @@ class SpyScanEngine:
         assert target, (
             f"SpyScanEngine.run_tool called with EMPTY target "
             f"(the target='' regression) — tool={getattr(tool,'value',tool)}")
-        assert target == self._authorized, (
-            f"SpyScanEngine got target={target!r} but authorized target is "
-            f"{self._authorized!r} — target must come from the gated goal")
+        assert target == self._expected_host, (
+            f"SpyScanEngine got target={target!r} but expected the BARE host "
+            f"{self._expected_host!r} (scheme must be stripped before run_tool)")
+        # a bare host must NOT carry a scheme (tools want IP/host, not a URL)
+        assert "://" not in target, (
+            f"run_tool received a scheme'd target {target!r} — tools need bare host")
         # default: empty output (these tests only verify the target reaches the
         # engine); a raw_output may be supplied to exercise real parsing too.
         return self._raw_output
@@ -86,11 +97,12 @@ def test_invoke_with_ctx_reaches_engine_with_authorized_target():
     ctx = GateContext(target_url=AUTH_TARGET, scope=AUTH_SCOPE,
                       authorizer=_authorizer_ok())
     asyncio.run(srv.invoke(call, _allow_nmap(), ctx))
-    # spy was called exactly once, with the authorized non-empty target
+    # spy was called exactly once, with the authorized target as a BARE host
+    # (scheme stripped before run_tool; the gated ctx carries the scheme'd URL)
     assert len(spy.calls) == 1
     tool, target, args = spy.calls[0]
-    assert target == AUTH_TARGET
-    assert target != ""
+    assert target == AUTH_HOST
+    assert "://" not in target and target != ""
 
 
 def test_invoke_ctx_none_short_circuits_and_does_not_call_engine():
@@ -175,7 +187,8 @@ def test_e2e_loop_engine_sees_goal_target():
 
     assert len(spy.calls) == 1
     _, target, _ = spy.calls[0]
-    assert target == goal.target_url and target != ""
+    # engine sees the goal's host as a BARE host (scheme stripped for the tool)
+    assert target == AUTH_HOST and "://" not in target and target != ""
 
 
 # --------------------------------------------------------------------------- #
@@ -203,10 +216,78 @@ def test_p2_planner_cannot_influence_target(adv_args, token):
     ctx = GateContext(target_url=AUTH_TARGET, scope=AUTH_SCOPE,
                       authorizer=_authorizer_ok())
     asyncio.run(srv.invoke(call, appr, ctx))
-    # spy's own assertions already enforce target==AUTH_TARGET & non-empty;
+    # spy's own assertions already enforce target==AUTH_HOST & non-empty;
     # double-check here that no adversarial value leaked into the target
     assert len(spy.calls) == 1
     _, target, _ = spy.calls[0]
-    assert target == AUTH_TARGET
+    assert target == AUTH_HOST
     for v in adv_args.values():
         assert target != v, f"adversarial arg {v!r} leaked into target"
+
+
+# --------------------------------------------------------------------------- #
+# Regression — bare-IP target: scope normalization so the gate ALLOWs a bare IP
+# (root cause of the live agent run DENY: urlparse(bare IP).hostname == None ->
+# is_target_in_scope False -> gate DENY every step). Fix (option A): the agent
+# path threads a scheme'd target_url into GateContext so the gate's scope check
+# passes, and _do_recon strips the scheme back to a bare host before run_tool.
+# We do NOT touch GuardrailGate.check or is_target_in_scope.
+# --------------------------------------------------------------------------- #
+import importlib.util
+import os as _os
+
+BARE_IP = "198.51.100.32"
+IP_SCOPE = ProgramScope(domains=[BARE_IP])
+
+
+def _load_normalizer():
+    """Load _normalize_scope_target from the hyphenated eliana-integration pkg."""
+    repo_root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", ".."))
+    path = _os.path.join(repo_root, "eliana-integration", "telegram_runtime.py")
+    spec = importlib.util.spec_from_file_location("telegram_runtime_norm", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod._normalize_scope_target
+
+
+def test_normalizer_adds_scheme_to_bare_ip_only():
+    norm = _load_normalizer()
+    assert norm("198.51.100.32") == "https://198.51.100.32"   # bare IP -> scheme'd
+    assert norm("app.example.com") == "https://app.example.com"
+    # already-scheme'd is left unchanged (no double prefix)
+    assert norm("https://198.51.100.32") == "https://198.51.100.32"
+    assert norm("http://x.example") == "http://x.example"
+    assert norm("") == ""
+
+
+def test_bare_ip_goal_gate_allows_after_normalization():
+    """The exact live-run failure: a bare-IP target. With the agent path's
+    normalization, GateContext.target_url carries a scheme so the REAL
+    GuardrailGate ALLOWs (previously DENYed 'target not in scope')."""
+    norm = _load_normalizer()
+    gate = GuardrailGate()
+    # agent path builds scope from the bare host, target_url from the normalized
+    ctx = GateContext(target_url=norm(BARE_IP), scope=IP_SCOPE,
+                      authorizer=_authorizer_ok())
+    gd = gate.check(ToolCall("nmap", {}), ctx)
+    assert gd.outcome == GateOutcome.ALLOW, (
+        f"bare-IP target still DENYed after normalization: {gd.reason!r}")
+    assert gd.token
+
+
+def test_bare_ip_run_tool_receives_bare_host_not_url():
+    """After ALLOW, _do_recon must hand run_tool the BARE IP (scheme stripped) —
+    nmap et al. need a host/IP, not a URL."""
+    norm = _load_normalizer()
+    spy = SpyScanEngine(norm(BARE_IP))   # expects bare host 198.51.100.32
+    srv = ElianaMCPServer(scan_engine=spy)
+    gate = GuardrailGate()
+    ctx = GateContext(target_url=norm(BARE_IP), scope=IP_SCOPE,
+                      authorizer=_authorizer_ok())
+    gd = gate.check(ToolCall("nmap", {}), ctx)
+    assert gd.outcome == GateOutcome.ALLOW
+    asyncio.run(srv.invoke(gd.call, gd, ctx))
+    assert len(spy.calls) == 1
+    _, target, _ = spy.calls[0]
+    assert target == BARE_IP                 # bare IP, no scheme
+    assert "://" not in target

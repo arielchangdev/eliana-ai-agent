@@ -219,3 +219,46 @@ def test_persist_db_failure_raises_not_silent():
             await persister.persist(_Outcome())
 
     asyncio.run(_run())
+
+
+# --------------------------------------------------------------------------- #
+# Regression — bare-IP goal: the persisted scans.target_url must be the BARE
+# host even when the goal carries a scheme (the agent path threads a scheme'd
+# target_url for the gate; persister strips it, like legacy). Guards against a
+# scheme leaking into bounty.db for a bare-IP target.
+# --------------------------------------------------------------------------- #
+IP_TARGET_SCHEMED = "https://198.51.100.32"
+IP_HOST = "198.51.100.32"
+IP_SCOPE = ProgramScope(domains=[IP_HOST])
+
+
+def test_persist_strips_scheme_for_bare_ip_goal():
+    async def _run():
+        db_path = _make_temp_db_path()
+        try:
+            await _init_schema(db_path)
+
+            class _Trace:
+                goal = AssessmentGoal(target_url=IP_TARGET_SCHEMED, scope=IP_SCOPE,
+                                      max_steps=3)
+            class _Outcome:
+                trace = _Trace()
+                findings = [{"severity": "info", "title": "Open port 80/tcp",
+                             "affected_endpoint": "198.51.100.32:80/tcp",
+                             "tool": "nmap", "attack_technique_id": "T1046"}]
+
+            persister = AgentRunPersister(db_path=db_path, report_llm=None)
+            scan_id = await persister.persist(_Outcome())
+
+            async with aiosqlite.connect(db_path) as conn:
+                row = await (await conn.execute(
+                    "SELECT target_url, profile FROM scans WHERE id=?",
+                    (scan_id,))).fetchone()
+            # db stores the BARE host (scheme stripped), matching legacy rows
+            assert row[0] == IP_HOST, row
+            assert "://" not in row[0]
+            assert AGENT_ORIGIN_MARKER["origin"] in (row[1] or "")
+        finally:
+            _safe_unlink(db_path)
+
+    asyncio.run(_run())

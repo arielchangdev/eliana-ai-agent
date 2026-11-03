@@ -296,14 +296,21 @@ class ElianaMCPServer:
         # (that was the root-cause bug: target="" meant "scan nothing").
         if not target or not str(target).strip():
             return Observation(tool_name=call.tool_name, findings=[], raw_excerpt="")
+        # The gated `target` (from GateContext) carries a scheme so the gate's
+        # scope check (urlparse) works for a bare IP. Tools (nmap et al.) want a
+        # bare host/IP, NOT a URL — so strip the scheme here, ONCE, and reuse the
+        # same bare host for BOTH run_tool and the parser. This mirrors legacy
+        # AuthorizedScanner.scan, which checks scope on the scheme'd `norm` but
+        # runs tools against `scan_host = norm.split("://")[-1].split("/")[0]`.
+        scan_host = str(target).split("://")[-1].split("/")[0]
         # arguments come from the eval-mode allowlist. We do NOT trust
         # call.arguments blindly — re-derive the eval-mode args as a second
         # guarantee that no intrusive flag reaches run_tool.
         args = list(_EVAL_MODE_ARGS.get(tool, []))
-        result = self._scan_engine.run_tool(tool, target, args)
+        result = self._scan_engine.run_tool(tool, scan_host, args)
         if asyncio.iscoroutine(result):
             result = await result
-        return self._parse_recon_output(call.tool_name, result, target)
+        return self._parse_recon_output(call.tool_name, result, scan_host)
 
     def _parse_recon_output(self, tool_name: str, raw: object,
                             target: str = "") -> Observation:
