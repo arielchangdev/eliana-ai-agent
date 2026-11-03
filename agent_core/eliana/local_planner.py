@@ -20,6 +20,7 @@ Guarantees:
 from __future__ import annotations
 
 import json
+import logging
 import urllib.error
 import urllib.request
 from typing import Optional
@@ -30,6 +31,12 @@ from ..models import (
     PlannerDecision,
     ToolCall,
 )
+
+# Stdlib logger (journald-visible at INFO). Observability only — records what the
+# local model actually returned and how it was parsed, so a surprising STOP (e.g.
+# the 3b model declining to pick a tool on step 0) is diagnosable from the log
+# rather than being an invisible "0 findings, no trace".
+logger = logging.getLogger("eliana.planner")
 
 _DEFAULT_BASE_URL = "http://127.0.0.1:11434"
 _DEFAULT_MODEL = "llama3.2:3b"   # probe-decided default (see design)
@@ -105,7 +112,18 @@ class LocalPlannerLLM:
             ],
         }
         raw = self._chat(payload)              # may raise PlannerUnavailable
-        return self._parse_decision(raw, state)
+        # Observability: record the RAW model response (truncated, non-sensitive
+        # — it is the planner's own JSON: an action/tool/rationale, never scan
+        # payloads) BEFORE parsing, so we can see exactly what the model said.
+        logger.info("planner_raw_response model=%s step=%d raw=%r",
+                    self._model, len(state.steps_taken), (raw or "")[:500])
+        decision = self._parse_decision(raw, state)
+        # ...and the parsed outcome (what the loop will act on).
+        _tool = (decision.tool_call.tool_name
+                 if decision.tool_call is not None else None)
+        logger.info("planner_decision kind=%s tool=%s rationale=%r",
+                    decision.kind.value, _tool, (decision.rationale or "")[:200])
+        return decision
 
     # -- transport (sync urllib; the loop awaits via its own executor) --- #
     def _chat(self, payload: dict) -> str:

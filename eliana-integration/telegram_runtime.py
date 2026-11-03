@@ -251,7 +251,13 @@ class TelegramRuntime:
         if persister is not None:
             try:
                 scan_id = await persister.persist(outcome)
-                logger.info("agent_run_persisted", scan_id=scan_id, target=target)
+                # NOTE: `logger` is the stdlib logging.Logger — it takes %-style
+                # args, NOT structlog-style kwargs. Passing scan_id=/target= as
+                # kwargs raises "Logger._log() got an unexpected keyword
+                # argument", which previously surfaced as a MISLEADING
+                # "persistence failed" even though persist() had succeeded.
+                logger.info("agent_run_persisted scan_id=%s target=%s",
+                            scan_id, target)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("agent run persistence failed: %s", exc)
 
@@ -274,8 +280,10 @@ class TelegramRuntime:
         try:
             await self._app.bot.send_message(chat_id=int(chat_id),
                                              text="\n".join(lines))
-        except Exception:
-            logger.warning("agent result send failed")
+        except Exception as exc:  # noqa: BLE001
+            # surface the real error (%-style, stdlib logger) so a send failure
+            # is diagnosable instead of a bare "failed" with no cause
+            logger.warning("agent result send failed: %s", exc)
 
     async def _fallback_to_legacy(self, update, chat_id, target, scope,
                                   reason: str) -> None:

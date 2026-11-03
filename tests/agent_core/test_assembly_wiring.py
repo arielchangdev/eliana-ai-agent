@@ -183,3 +183,160 @@ def test_runtime_planner_unavailable_does_not_persist():
             t.cancel()
     asyncio.run(_go())
     assert spy.persisted == [], "planner-unavailable must not persist an agent run"
+
+
+# --------------------------------------------------------------------------- #
+# Regression — logger bug: the post-persist log call must NOT raise, so a
+# SUCCESSFUL persist is never misreported as "persistence failed" and the
+# result message is still sent. (This bug slipped through before because no
+# test asserted the stdlib logger call was well-formed.)
+# --------------------------------------------------------------------------- #
+import logging
+
+
+class _Capture(logging.Handler):
+    """Collect (level, formatted-message) for a named logger, and FAIL loudly if
+    a record cannot be formatted — which is exactly what the structlog-style
+    kwargs bug would do inside the stdlib logger path."""
+    def __init__(self):
+        super().__init__()
+        self.records = []
+        self.format_errors = []
+    def emit(self, record):
+        try:
+            self.records.append((record.levelno, record.getMessage()))
+        except Exception as exc:  # noqa: BLE001
+            self.format_errors.append(str(exc))
+
+
+def _attach(logger_name):
+    lg = logging.getLogger(logger_name)
+    cap = _Capture()
+    lg.addHandler(cap)
+    lg.setLevel(logging.INFO)
+    return lg, cap
+
+
+def test_runtime_persist_log_does_not_raise_and_result_sent():
+    """After a successful persist, the 'agent_run_persisted' log must be a
+    well-formed stdlib call (no kwargs blow-up), NO 'persistence failed' warning
+    is emitted, and the result message is sent. Directly guards the logger bug
+    that made a successful persist look failed and blocked the Telegram reply."""
+    tr = _load_telegram_runtime()
+    lg, cap = _attach("eliana.telegram")
+    try:
+        outcome = _FakeOutcome(findings=[
+            {"severity": "info", "attack_technique_id": "T1046",
+             "affected_endpoint": "h:80/tcp", "tool": "nmap"}])
+        spy = _SpyPersister()
+        rt = tr.TelegramRuntime(
+            agent={"loop": _FakeLoop(outcome), "persister": spy})
+        rt._app = _FakeApp()
+        asyncio.run(rt._run_agent_assessment(
+            update=None, chat_id="42", target=AUTH_TARGET, scope=scope()))
+
+        # persist ran
+        assert len(spy.persisted) == 1
+        # the stdlib logger never choked on the log record (the bug's signature)
+        assert cap.format_errors == [], cap.format_errors
+        msgs = [m for _lvl, m in cap.records]
+        # success log present, carrying the scan_id + target
+        assert any("agent_run_persisted" in m and "scan-id-123" in m for m in msgs), msgs
+        # and NO misleading "persistence failed" warning
+        assert not any("persistence failed" in m for m in msgs), msgs
+        # the user actually got the result message
+        assert rt._app.bot.sent, "result message not sent"
+    finally:
+        lg.removeHandler(cap)
+
+
+def test_runtime_result_send_failure_surfaces_cause():
+    """If the Telegram send genuinely fails, the warning now carries the real
+    exception cause (not a bare 'failed'), so send failures are diagnosable."""
+    tr = _load_telegram_runtime()
+    lg, cap = _attach("eliana.telegram")
+    try:
+        outcome = _FakeOutcome(findings=[])
+        spy = _SpyPersister()
+
+        class _BoomBot:
+            async def send_message(self, chat_id, text):
+                raise RuntimeError("telegram 503 boom")
+        class _BoomApp:
+            bot = _BoomBot()
+
+        rt = tr.TelegramRuntime(
+            agent={"loop": _FakeLoop(outcome), "persister": spy})
+        rt._app = _BoomApp()
+        asyncio.run(rt._run_agent_assessment(
+            update=None, chat_id="42", target=AUTH_TARGET, scope=scope()))
+
+        assert cap.format_errors == []
+        msgs = [m for _lvl, m in cap.records]
+        # the real cause is surfaced in the warning
+        assert any("agent result send failed" in m and "telegram 503 boom" in m
+                   for m in msgs), msgs
+    finally:
+        lg.removeHandler(cap)
+
+
+# --------------------------------------------------------------------------- #
+# Observability — LocalPlannerLLM logs the raw model response + parsed decision,
+# so a surprising STOP (model declining to pick a tool) is visible in journald.
+# --------------------------------------------------------------------------- #
+def test_planner_logs_raw_response_and_decision():
+    """decide() must log the raw model response AND the parsed decision. Uses a
+    stubbed _chat so no real Ollama is contacted."""
+    from agent_core.eliana.local_planner import LocalPlannerLLM
+    from agent_core.models import PerceivedState, AssessmentGoal, ToolSpec
+
+    lg, cap = _attach("eliana.planner")
+    try:
+        planner = LocalPlannerLLM()
+        # stub the transport: return a STOP-shaped JSON (reproduces the 3b
+        # "declines to pick a tool" case we saw on the VM) — no network.
+        raw_json = '{"action": "stop", "rationale": "nothing actionable yet"}'
+        planner._chat = lambda payload: raw_json  # type: ignore
+
+        state = PerceivedState(
+            goal=AssessmentGoal(target_url=AUTH_TARGET, scope=scope(),
+                                description="assess", max_steps=3),
+            findings_so_far=[], steps_taken=[],
+            available_tools=[ToolSpec("recon_scan", "recon")])
+        decision = asyncio.run(planner.decide(state))
+
+        assert decision.kind == DecisionKind.STOP
+        assert cap.format_errors == []
+        msgs = [m for _lvl, m in cap.records]
+        # raw response logged (so we can see WHAT the model said)
+        assert any("planner_raw_response" in m and "nothing actionable" in m
+                   for m in msgs), msgs
+        # parsed decision logged (kind=stop)
+        assert any("planner_decision" in m and "kind=stop" in m for m in msgs), msgs
+    finally:
+        lg.removeHandler(cap)
+
+
+def test_planner_logs_invoke_decision_with_tool():
+    """When the model picks a tool, the decision log names that tool."""
+    from agent_core.eliana.local_planner import LocalPlannerLLM
+    from agent_core.models import PerceivedState, AssessmentGoal, ToolSpec
+
+    lg, cap = _attach("eliana.planner")
+    try:
+        planner = LocalPlannerLLM()
+        planner._chat = lambda payload: (  # type: ignore
+            '{"action": "invoke_tool", "tool": "nmap", "rationale": "port recon"}')
+        state = PerceivedState(
+            goal=AssessmentGoal(target_url=AUTH_TARGET, scope=scope(),
+                                description="assess", max_steps=3),
+            findings_so_far=[], steps_taken=[],
+            available_tools=[ToolSpec("recon_scan", "recon")])
+        decision = asyncio.run(planner.decide(state))
+
+        assert decision.kind == DecisionKind.INVOKE_TOOL
+        assert decision.tool_call.tool_name == "nmap"
+        msgs = [m for _lvl, m in cap.records]
+        assert any("planner_decision" in m and "tool=nmap" in m for m in msgs), msgs
+    finally:
+        lg.removeHandler(cap)
